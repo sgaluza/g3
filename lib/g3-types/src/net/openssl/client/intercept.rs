@@ -576,13 +576,13 @@ impl OpensslInterceptionClientConfigBuilder {
     }
 }
 
-#[cfg(all(test, boringssl))]
+#[cfg(test)]
 mod tests {
     use std::io::{self, Read, Write};
 
     use super::*;
 
-    /// TLS 1.2 cipher list sent by Chrome; BoringSSL prepends its fixed TLS 1.3 suites
+    /// TLS 1.2 cipher list sent by Chrome; the library prepends its own TLS 1.3 suites
     const CHROME_CIPHER_LIST: &str = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
         ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
         ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:\
@@ -633,7 +633,11 @@ mod tests {
         u16::from_be_bytes([buf[offset], buf[offset + 1]])
     }
 
-    /// Parse cipher suites and extension types (GREASE values skipped) from a ClientHello record
+    /// TLS_EMPTY_RENEGOTIATION_INFO_SCSV, a signaling value OpenSSL adds to the cipher list
+    const RENEGOTIATION_INFO_SCSV: u16 = 0x00ff;
+
+    /// Parse cipher suites (GREASE and SCSV skipped) and extension types (GREASE skipped)
+    /// from a ClientHello record
     fn parse_client_hello(record: &[u8]) -> ClientHello {
         assert_eq!(record[0], 0x16, "not a handshake record");
         assert_eq!(record[5], 0x01, "not a ClientHello");
@@ -645,7 +649,7 @@ mod tests {
         offset += 2;
         let cipher_suites = (0..suites_len / 2)
             .map(|i| read_u16(record, offset + i * 2))
-            .filter(|v| !is_grease(*v))
+            .filter(|v| !is_grease(*v) && *v != RENEGOTIATION_INFO_SCSV)
             .collect();
         offset += suites_len;
         offset += 1 + record[offset] as usize; // compression methods
@@ -714,6 +718,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(boringssl)]
     fn ech_grease_and_alps_sent_when_enabled() {
         let hello = capture_client_hello(&chrome_like_builder(), &["h2", "http/1.1"]);
 
@@ -722,6 +727,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(boringssl)]
     fn alps_skipped_without_h2() {
         let hello = capture_client_hello(&chrome_like_builder(), &["http/1.1"]);
 
