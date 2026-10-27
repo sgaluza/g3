@@ -591,6 +591,7 @@ The keys are:
 
   Set the cipher list for TLS 1.2 and below, in OpenSSL cipher string format.
   TLS 1.3 cipher suites are not affected.
+  TLCP connections (Tongsuo) are not affected either, as they use their own SM cipher suites.
 
   **default**: not set, the default list of the OpenSSL variant is used
 
