@@ -54,7 +54,7 @@ impl ContextPair {
             unsafe { openssl_sys::SSL_set_enable_ech_grease(ssl_ptr, 1) };
         }
 
-        let offers_h2 = alpn_ext.is_some_and(|alpn| !alpn.retain_clone(|p| p == b"h2").is_empty());
+        let offers_h2 = alpn_ext.is_some_and(|alpn| alpn.contains(b"h2"));
         if self.enable_alps && offers_h2 {
             let proto = b"h2";
             // SAFETY: ssl_ptr is valid, BoringSSL copies both buffers before returning
