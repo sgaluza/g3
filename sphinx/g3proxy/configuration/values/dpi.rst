@@ -585,6 +585,37 @@ The keys are:
 
   .. versionadded:: 1.7.36
 
+* cipher_list
+
+  **optional**, **type**: str
+
+  Set the cipher list for TLS 1.2 and below, in OpenSSL cipher string format.
+  TLS 1.3 cipher suites are not affected.
+  TLCP connections (Tongsuo) are not affected either, as they use their own SM cipher suites.
+
+  **default**: not set, the default list of the OpenSSL variant is used
+
+* enable_ech_grease
+
+  **optional**, **type**: bool
+
+  Send a GREASE ECH (encrypted_client_hello) extension, like Chrome does when no ECH config is known.
+
+  Only supported for BoringSSL.
+
+  **default**: false
+
+* enable_alps
+
+  **optional**, **type**: bool
+
+  Send the ALPS (application_settings, new codepoint) extension with Chrome's HTTP/2 SETTINGS
+  if h2 is in the ALPN list of the client.
+
+  Only supported for BoringSSL.
+
+  **default**: false
+
 * insecure:
 
   **optional**, **type**: bool

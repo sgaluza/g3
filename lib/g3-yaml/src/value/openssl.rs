@@ -477,6 +477,21 @@ pub fn as_tls_interception_client_config_builder(
                 builder.set_permute_extensions(enable);
                 Ok(())
             }
+            "cipher_list" => {
+                let ciphers = crate::value::as_string(v)?;
+                builder.set_cipher_list(ciphers);
+                Ok(())
+            }
+            "enable_ech_grease" => {
+                let enable = crate::value::as_bool(v)?;
+                builder.set_enable_ech_grease(enable);
+                Ok(())
+            }
+            "enable_alps" => {
+                let enable = crate::value::as_bool(v)?;
+                builder.set_enable_alps(enable);
+                Ok(())
+            }
             "insecure" => {
                 let enable = crate::value::as_bool(v)?;
                 builder.set_insecure(enable);
@@ -1244,6 +1259,9 @@ mod tests {
                 enable_sct: true
                 enable_grease: true
                 permute_extensions: true
+                cipher_list: "ECDHE-RSA-AES128-GCM-SHA256:AES128-SHA"
+                enable_ech_grease: true
+                enable_alps: true
                 insecure: false
             "#,
             cert_path.display()
@@ -1266,6 +1284,9 @@ mod tests {
         expected.set_enable_sct(true);
         expected.set_enable_grease(true);
         expected.set_permute_extensions(true);
+        expected.set_cipher_list("ECDHE-RSA-AES128-GCM-SHA256:AES128-SHA".to_string());
+        expected.set_enable_ech_grease(true);
+        expected.set_enable_alps(true);
         expected.set_insecure(false);
         assert_eq!(builder, expected);
 

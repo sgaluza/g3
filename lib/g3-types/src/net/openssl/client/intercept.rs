@@ -17,13 +17,65 @@ use super::{
 };
 use crate::net::{TlsAlpn, TlsServerName, TlsVersion, UpstreamAddr};
 
+/// HTTP/2 SETTINGS payload that Chrome puts into ALPS for h2:
+/// HEADER_TABLE_SIZE=65536, ENABLE_PUSH=0, INITIAL_WINDOW_SIZE=6291456, MAX_HEADER_LIST_SIZE=262144
+#[cfg(boringssl)]
+const CHROME_H2_ALPS_SETTINGS: [u8; 24] = [
+    0x00, 0x01, 0x00, 0x01, 0x00, 0x00, // HEADER_TABLE_SIZE
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, // ENABLE_PUSH
+    0x00, 0x04, 0x00, 0x60, 0x00, 0x00, // INITIAL_WINDOW_SIZE
+    0x00, 0x06, 0x00, 0x04, 0x00, 0x00, // MAX_HEADER_LIST_SIZE
+];
+
 #[derive(Clone)]
 struct ContextPair {
     ssl_context: SslContext,
     session_cache: Option<OpensslClientSessionCache>,
+    #[cfg(boringssl)]
+    enable_ech_grease: bool,
+    #[cfg(boringssl)]
+    enable_alps: bool,
 }
 
 impl ContextPair {
+    /// Per-connection BoringSSL options that can't be set on SslContext:
+    /// GREASE ECH and ALPS for h2 (new codepoint, as current Chrome does)
+    #[cfg(boringssl)]
+    fn set_browser_extensions(
+        &self,
+        ssl: &mut Ssl,
+        alpn_ext: Option<&TlsAlpn>,
+    ) -> anyhow::Result<()> {
+        use openssl::foreign_types::ForeignTypeRef;
+
+        let ssl_ptr = ssl.as_ptr();
+        if self.enable_ech_grease {
+            // SAFETY: ssl_ptr is a valid SSL owned by `ssl` for the whole call
+            unsafe { openssl_sys::SSL_set_enable_ech_grease(ssl_ptr, 1) };
+        }
+
+        let offers_h2 = alpn_ext.is_some_and(|alpn| alpn.contains(b"h2"));
+        if self.enable_alps && offers_h2 {
+            let proto = b"h2";
+            // SAFETY: ssl_ptr is valid, BoringSSL copies both buffers before returning
+            let r = unsafe {
+                openssl_sys::SSL_add_application_settings(
+                    ssl_ptr,
+                    proto.as_ptr(),
+                    proto.len(),
+                    CHROME_H2_ALPS_SETTINGS.as_ptr(),
+                    CHROME_H2_ALPS_SETTINGS.len(),
+                )
+            };
+            if r != 1 {
+                return Err(anyhow!("failed to add h2 application settings"));
+            }
+            // SAFETY: ssl_ptr is a valid SSL owned by `ssl` for the whole call
+            unsafe { openssl_sys::SSL_set_alps_use_new_codepoint(ssl_ptr, 1) };
+        }
+        Ok(())
+    }
+
     pub fn build_ssl(
         &self,
         server_name: Option<&TlsServerName>,
@@ -47,6 +99,8 @@ impl ContextPair {
             ssl.set_alpn_protos(v.wired_list_sequence())
                 .map_err(|e| anyhow!("failed to set alpn protocols: {e}"))?;
         }
+        #[cfg(boringssl)]
+        self.set_browser_extensions(&mut ssl, alpn_ext)?;
         Ok(ssl)
     }
 }
@@ -99,6 +153,11 @@ pub struct OpensslInterceptionClientConfigBuilder {
     enable_grease: bool,
     #[cfg(any(awslc, boringssl))]
     permute_extensions: bool,
+    cipher_list: String,
+    #[cfg(boringssl)]
+    enable_ech_grease: bool,
+    #[cfg(boringssl)]
+    enable_alps: bool,
     insecure: bool,
 }
 
@@ -119,6 +178,11 @@ impl Default for OpensslInterceptionClientConfigBuilder {
             enable_grease: false,
             #[cfg(any(awslc, boringssl))]
             permute_extensions: false,
+            cipher_list: String::default(),
+            #[cfg(boringssl)]
+            enable_ech_grease: false,
+            #[cfg(boringssl)]
+            enable_alps: false,
             insecure: false,
         }
     }
@@ -219,6 +283,33 @@ impl OpensslInterceptionClientConfigBuilder {
         warn!("permute extensions can only be set for BoringSSL variants");
     }
 
+    /// Cipher list for TLS 1.2 and below, in OpenSSL cipher string format
+    #[inline]
+    pub fn set_cipher_list(&mut self, ciphers: String) {
+        self.cipher_list = ciphers;
+    }
+
+    #[cfg(boringssl)]
+    pub fn set_enable_ech_grease(&mut self, enable: bool) {
+        self.enable_ech_grease = enable;
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn set_enable_ech_grease(&mut self, _enable: bool) {
+        warn!("ECH GREASE can only be set for BoringSSL");
+    }
+
+    /// Send ALPS (application_settings) with Chrome's HTTP/2 SETTINGS when h2 is offered
+    #[cfg(boringssl)]
+    pub fn set_enable_alps(&mut self, enable: bool) {
+        self.enable_alps = enable;
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn set_enable_alps(&mut self, _enable: bool) {
+        warn!("ALPS can only be set for BoringSSL");
+    }
+
     pub fn set_insecure(&mut self, enable: bool) {
         self.insecure = enable;
     }
@@ -244,6 +335,15 @@ impl OpensslInterceptionClientConfigBuilder {
             ctx_builder
                 .set_max_proto_version(Some(version.into()))
                 .map_err(|e| anyhow!("failed to set max ssl version to {version}: {e}"))?;
+        }
+        Ok(())
+    }
+
+    fn build_set_cipher_list(&self, ctx_builder: &mut SslContextBuilder) -> anyhow::Result<()> {
+        if !self.cipher_list.is_empty() {
+            ctx_builder
+                .set_cipher_list(&self.cipher_list)
+                .map_err(|e| anyhow!("failed to set cipher list: {e}"))?;
         }
         Ok(())
     }
@@ -326,6 +426,8 @@ impl OpensslInterceptionClientConfigBuilder {
             ctx_builder.set_permute_extensions(true);
         }
 
+        self.build_set_cipher_list(&mut ctx_builder)?;
+
         self.build_set_cert_compression(&mut ctx_builder)?;
 
         self.build_set_verify_cert_store(&mut ctx_builder)?;
@@ -335,6 +437,10 @@ impl OpensslInterceptionClientConfigBuilder {
         Ok(ContextPair {
             ssl_context: ctx_builder.build().into_context(),
             session_cache,
+            #[cfg(boringssl)]
+            enable_ech_grease: self.enable_ech_grease,
+            #[cfg(boringssl)]
+            enable_alps: self.enable_alps,
         })
     }
 
@@ -361,6 +467,8 @@ impl OpensslInterceptionClientConfigBuilder {
                 .map_err(|e| anyhow!("failed to enable OCSP status request: {e}"))?;
             // TODO check OCSP response
         }
+
+        self.build_set_cipher_list(&mut ctx_builder)?;
 
         self.build_set_verify_cert_store(&mut ctx_builder)?;
 
@@ -401,6 +509,8 @@ impl OpensslInterceptionClientConfigBuilder {
                 .enable_ct(SslCtValidationMode::PERMISSIVE)
                 .map_err(|e| anyhow!("failed to enable SCT: {e}"))?;
         }
+
+        self.build_set_cipher_list(&mut ctx_builder)?;
 
         #[cfg(tongsuo)]
         self.build_set_cert_compression(&mut ctx_builder)?;
@@ -463,5 +573,174 @@ impl OpensslInterceptionClientConfigBuilder {
             insecure: self.insecure,
             handshake_timeout: self.handshake_timeout,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Read, Write};
+
+    use super::*;
+
+    /// TLS 1.2 cipher list sent by Chrome; the library prepends its own TLS 1.3 suites
+    const CHROME_CIPHER_LIST: &str = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
+        ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
+        ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:\
+        ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:\
+        AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA";
+
+    const CHROME_TLS12_SUITES: [u16; 12] = [
+        0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014, 0x009c, 0x009d, 0x002f,
+        0x0035,
+    ];
+
+    const EXT_ALPS_NEW_CODEPOINT: u16 = 17613;
+    const EXT_ECH: u16 = 0xfe0d;
+
+    /// Stream that records everything written and never yields data,
+    /// so the handshake stops right after the ClientHello is sent
+    struct ClientHelloRecorder {
+        written: Vec<u8>,
+    }
+
+    impl Read for ClientHelloRecorder {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+
+    impl Write for ClientHelloRecorder {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ClientHello {
+        cipher_suites: Vec<u16>,
+        extensions: Vec<u16>,
+    }
+
+    fn is_grease(v: u16) -> bool {
+        v & 0x0f0f == 0x0a0a && (v >> 8) == (v & 0xff)
+    }
+
+    fn read_u16(buf: &[u8], offset: usize) -> u16 {
+        u16::from_be_bytes([buf[offset], buf[offset + 1]])
+    }
+
+    /// TLS_EMPTY_RENEGOTIATION_INFO_SCSV, a signaling value OpenSSL adds to the cipher list
+    const RENEGOTIATION_INFO_SCSV: u16 = 0x00ff;
+
+    /// Parse cipher suites (GREASE and SCSV skipped) and extension types (GREASE skipped)
+    /// from a ClientHello record
+    fn parse_client_hello(record: &[u8]) -> ClientHello {
+        assert_eq!(record[0], 0x16, "not a handshake record");
+        assert_eq!(record[5], 0x01, "not a ClientHello");
+        // record header (5) + handshake header (4) + legacy_version (2) + random (32)
+        let mut offset = 5 + 4 + 2 + 32;
+        offset += 1 + record[offset] as usize; // session id
+
+        let suites_len = read_u16(record, offset) as usize;
+        offset += 2;
+        let cipher_suites = (0..suites_len / 2)
+            .map(|i| read_u16(record, offset + i * 2))
+            .filter(|v| !is_grease(*v) && *v != RENEGOTIATION_INFO_SCSV)
+            .collect();
+        offset += suites_len;
+        offset += 1 + record[offset] as usize; // compression methods
+
+        let ext_end = offset + 2 + read_u16(record, offset) as usize;
+        offset += 2;
+        let mut extensions = Vec::new();
+        while offset < ext_end {
+            let ext_type = read_u16(record, offset);
+            let ext_len = read_u16(record, offset + 2) as usize;
+            if !is_grease(ext_type) {
+                extensions.push(ext_type);
+            }
+            offset += 4 + ext_len;
+        }
+        ClientHello {
+            cipher_suites,
+            extensions,
+        }
+    }
+
+    /// Build Ssl from the builder and capture the ClientHello it sends with the given ALPN list
+    fn capture_client_hello(
+        builder: &OpensslInterceptionClientConfigBuilder,
+        alpn_protocols: &[&str],
+    ) -> ClientHello {
+        let config = builder.build().unwrap();
+        let upstream = UpstreamAddr::from_host_str_and_port("www.example.com", 443).unwrap();
+        let mut wired = vec![0u8, 0u8];
+        for p in alpn_protocols {
+            wired.push(p.len() as u8);
+            wired.extend_from_slice(p.as_bytes());
+        }
+        let list_len = (wired.len() - 2) as u16;
+        wired[..2].copy_from_slice(&list_len.to_be_bytes());
+        let alpn = TlsAlpn::from_extension_value(&wired).unwrap();
+
+        let ssl = config.build_ssl(None, &upstream, Some(&alpn)).unwrap();
+        let recorder = ClientHelloRecorder {
+            written: Vec::new(),
+        };
+        let mid = match ssl.connect(recorder) {
+            Err(openssl::ssl::HandshakeError::WouldBlock(mid)) => mid,
+            _ => panic!("handshake should stop waiting for ServerHello"),
+        };
+        parse_client_hello(&mid.get_ref().written)
+    }
+
+    fn chrome_like_builder() -> OpensslInterceptionClientConfigBuilder {
+        let mut builder = OpensslInterceptionClientConfigBuilder::default();
+        builder.set_cipher_list(CHROME_CIPHER_LIST.to_string());
+        builder.set_enable_ech_grease(true);
+        builder.set_enable_alps(true);
+        builder
+    }
+
+    #[test]
+    fn cipher_list_matches_chrome() {
+        let hello = capture_client_hello(&chrome_like_builder(), &["h2", "http/1.1"]);
+
+        assert_eq!(hello.cipher_suites.len(), 15);
+        let mut tls13 = hello.cipher_suites[..3].to_vec();
+        tls13.sort_unstable();
+        assert_eq!(tls13, [0x1301, 0x1302, 0x1303]);
+        assert_eq!(hello.cipher_suites[3..], CHROME_TLS12_SUITES);
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn ech_grease_and_alps_sent_when_enabled() {
+        let hello = capture_client_hello(&chrome_like_builder(), &["h2", "http/1.1"]);
+
+        assert!(hello.extensions.contains(&EXT_ECH));
+        assert!(hello.extensions.contains(&EXT_ALPS_NEW_CODEPOINT));
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn alps_skipped_without_h2() {
+        let hello = capture_client_hello(&chrome_like_builder(), &["http/1.1"]);
+
+        assert!(hello.extensions.contains(&EXT_ECH));
+        assert!(!hello.extensions.contains(&EXT_ALPS_NEW_CODEPOINT));
+    }
+
+    #[test]
+    fn ech_grease_and_alps_absent_by_default() {
+        let builder = OpensslInterceptionClientConfigBuilder::default();
+        let hello = capture_client_hello(&builder, &["h2", "http/1.1"]);
+
+        assert!(!hello.extensions.contains(&EXT_ECH));
+        assert!(!hello.extensions.contains(&EXT_ALPS_NEW_CODEPOINT));
     }
 }
