@@ -742,6 +742,31 @@ Set the config for HTTP 2.0 interception.
 
 The keys are:
 
+* upstream_profile
+
+  **optional**, **type**: str
+
+  Set how the h2 client to the upstream server presents itself. The values are:
+
+  - default: SETTINGS and window sizes from the keys below.
+  - chrome: SETTINGS (HEADER_TABLE_SIZE 65536, ENABLE_PUSH 0, INITIAL_WINDOW_SIZE 6MiB,
+    MAX_HEADER_LIST_SIZE 256KiB), connection window update, pseudo header order
+    (:method, :authority, :scheme, :path) and HEADERS priority as Chrome sends them.
+    The values of `max_header_list_size`, `max_frame_size`, `stream_window_size` and
+    `connection_window_size` are not used for the upstream connection then, but still
+    apply to the h2 connection with the client.
+
+  Use it together with the browser-like settings of
+  :ref:`tls interception client <conf_value_dpi_tls_interception_client>`, so that the
+  HTTP/2 fingerprint matches the TLS one.
+
+  .. note:: The chrome profile uses Chrome's flow-control windows towards the upstream:
+     6MiB per stream and 15MiB per connection, instead of 1MiB and 2MiB by default.
+     If the client reads slower than the upstream sends, the interception may buffer up
+     to these sizes per connection, so expect higher memory usage.
+
+  **default**: default
+
 * max_header_list_size
 
   **optional**, **type**: :ref:`humanize u32 <conf_value_humanize_u32>`

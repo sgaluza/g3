@@ -14,9 +14,9 @@ pub use protocol::{
 
 mod config;
 pub use config::{
-    H1InterceptionConfig, H2InterceptionConfig, ImapInterceptionConfig, ProtocolInspectAction,
-    ProtocolInspectPolicy, ProtocolInspectPolicyBuilder, ProtocolInspectionConfig,
-    ProtocolInspectionSizeLimit, SmtpInterceptionConfig,
+    H1InterceptionConfig, H2InterceptionConfig, H2UpstreamProfile, ImapInterceptionConfig,
+    ProtocolInspectAction, ProtocolInspectPolicy, ProtocolInspectPolicyBuilder,
+    ProtocolInspectionConfig, ProtocolInspectionSizeLimit, SmtpInterceptionConfig,
 };
 
 pub mod parser;

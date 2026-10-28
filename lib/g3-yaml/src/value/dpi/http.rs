@@ -67,6 +67,13 @@ pub fn as_h2_interception_config(value: &Yaml) -> anyhow::Result<H2InterceptionC
         let mut config = H2InterceptionConfig::default();
 
         crate::foreach_kv(map, |k, v| match crate::key::normalize(k).as_str() {
+            "upstream_profile" => {
+                let s = crate::value::as_string(v)?;
+                config.upstream_profile = s
+                    .parse()
+                    .map_err(|_| anyhow!("invalid h2 upstream profile {s} for key {k}"))?;
+                Ok(())
+            }
             "max_header_list_size" | "max_header_size" => {
                 config.max_header_list_size = crate::humanize::as_u32(v)
                     .context(format!("invalid humanize u32 value for key {k}"))?;
@@ -343,6 +350,16 @@ mod tests {
         assert_eq!(config.ping_interval, Duration::from_secs(60));
         assert_eq!(config.rsp_head_recv_timeout, Duration::from_secs(60));
         assert!(!config.silent_drop_expect_header);
+        assert_eq!(config.upstream_profile, g3_dpi::H2UpstreamProfile::Default);
+
+        // upstream fingerprint profile
+        let yaml = yaml_doc!(
+            r"
+                upstream_profile: chrome
+            "
+        );
+        let config = as_h2_interception_config(&yaml).unwrap();
+        assert_eq!(config.upstream_profile, g3_dpi::H2UpstreamProfile::Chrome);
 
         // value clamping
         let yaml = yaml_doc!(
@@ -362,6 +379,14 @@ mod tests {
         let yaml = yaml_doc!(
             r"
                 invalid_key: value
+            "
+        );
+        assert!(as_h2_interception_config(&yaml).is_err());
+
+        // unknown upstream profile
+        let yaml = yaml_doc!(
+            r"
+                upstream_profile: firefox
             "
         );
         assert!(as_h2_interception_config(&yaml).is_err());

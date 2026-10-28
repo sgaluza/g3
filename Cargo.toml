@@ -239,6 +239,15 @@ g3-udpdump = { version = "0.2", path = "lib/g3-udpdump" }
 g3-xcrypt = { version = "0.3", path = "lib/g3-xcrypt" }
 g3-yaml = { version = "0.6", path = "lib/g3-yaml" }
 
+[patch.crates-io]
+# h2 0.4.12 + Chrome-like request HEADERS (SBRO-77): client::Builder::pseudo_header_authority_first
+# and headers_priority. Both are off by default, so other h2 users in the workspace see plain 0.4.12;
+# only the chrome h2_interception.upstream_profile turns them on.
+# The patch is reviewed in sgaluza/h2#1 (base branch base/v0.4.12), the PR keeps this rev alive.
+# On an h2 CVE or the move to g3proxy 1.12.4 (SBRO-75) rebase the patch onto the new h2 release
+# and update the rev here; the long-term plan is to offer these options to upstream hyperium/h2.
+h2 = { git = "https://github.com/sgaluza/h2", rev = "f9b7854d1e5c99fdbb568de9a5f06e9fd24ba2e7" }
+
 [profile.release-lto]
 inherits = "release"
 strip = true
