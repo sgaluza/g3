@@ -760,6 +760,11 @@ The keys are:
   :ref:`tls interception client <conf_value_dpi_tls_interception_client>`, so that the
   HTTP/2 fingerprint matches the TLS one.
 
+  .. note:: The chrome profile uses Chrome's flow-control windows towards the upstream:
+     6MiB per stream and 15MiB per connection, instead of 1MiB and 2MiB by default.
+     If the client reads slower than the upstream sends, the interception may buffer up
+     to these sizes per connection, so expect higher memory usage.
+
   **default**: default
 
 * max_header_list_size
