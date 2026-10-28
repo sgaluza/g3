@@ -33,8 +33,31 @@ impl Default for H1InterceptionConfig {
     }
 }
 
+/// How the h2 client to the upstream presents itself
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum H2UpstreamProfile {
+    /// Connection settings from this config, h2 default request framing
+    #[default]
+    Default,
+    /// SETTINGS, WINDOW_UPDATE, pseudo header order and HEADERS priority as Chrome
+    Chrome,
+}
+
+impl std::str::FromStr for H2UpstreamProfile {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "default" => Ok(H2UpstreamProfile::Default),
+            "chrome" => Ok(H2UpstreamProfile::Chrome),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H2InterceptionConfig {
+    pub upstream_profile: H2UpstreamProfile,
     pub max_header_list_size: u32,
     pub max_concurrent_streams: u32,
     stream_window_size: u32,
@@ -52,6 +75,7 @@ pub struct H2InterceptionConfig {
 impl Default for H2InterceptionConfig {
     fn default() -> Self {
         H2InterceptionConfig {
+            upstream_profile: H2UpstreamProfile::Default,
             max_header_list_size: 64 * 1024, // 64KB
             max_concurrent_streams: 128,
             stream_window_size: 1024 * 1024,         // 1MiB

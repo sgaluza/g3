@@ -2224,8 +2224,7 @@ dependencies = [
 [[package]]
 name = "h2"
 version = "0.4.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c0b69cfcb4e1b9f1bf2f53f95f766e4661169728ec61cd3fe5a0166f2d1386"
+source = "git+https://github.com/sgaluza/h2?rev=2731926d2c2d278e0237f1746d6df82e47d2defa#2731926d2c2d278e0237f1746d6df82e47d2defa"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3149,7 +3148,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3348,7 +3347,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
