@@ -7,6 +7,7 @@ mod buf;
 mod dns;
 mod egress;
 mod error;
+mod h2_settings;
 mod haproxy;
 mod host;
 mod pool;
@@ -41,6 +42,7 @@ pub use buf::SocketBufferConfig;
 pub use dns::*;
 pub use egress::{EgressArea, EgressInfo};
 pub use error::ConnectError;
+pub use h2_settings::ChromeH2Settings;
 pub use haproxy::{
     ProxyProtocolEncodeError, ProxyProtocolEncoder, ProxyProtocolV2Encoder, ProxyProtocolVersion,
 };

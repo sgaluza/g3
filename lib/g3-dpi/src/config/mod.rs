@@ -18,7 +18,7 @@ mod size_limit;
 pub use size_limit::ProtocolInspectionSizeLimit;
 
 mod http;
-pub use http::{H1InterceptionConfig, H2InterceptionConfig};
+pub use http::{H1InterceptionConfig, H2InterceptionConfig, H2UpstreamProfile};
 
 mod smtp;
 pub use smtp::SmtpInterceptionConfig;

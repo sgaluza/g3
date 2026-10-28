@@ -239,6 +239,11 @@ g3-udpdump = { version = "0.2", path = "lib/g3-udpdump" }
 g3-xcrypt = { version = "0.3", path = "lib/g3-xcrypt" }
 g3-yaml = { version = "0.6", path = "lib/g3-yaml" }
 
+[patch.crates-io]
+# h2 0.4.12 + Chrome-like request HEADERS: :authority before :scheme and PRIORITY
+# (client::Builder::pseudo_header_authority_first / headers_priority), SBRO-77
+h2 = { git = "https://github.com/sgaluza/h2", rev = "2731926d2c2d278e0237f1746d6df82e47d2defa" }
+
 [profile.release-lto]
 inherits = "release"
 strip = true

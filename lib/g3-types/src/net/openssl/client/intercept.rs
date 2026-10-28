@@ -17,15 +17,10 @@ use super::{
 };
 use crate::net::{TlsAlpn, TlsServerName, TlsVersion, UpstreamAddr};
 
-/// HTTP/2 SETTINGS payload that Chrome puts into ALPS for h2:
-/// HEADER_TABLE_SIZE=65536, ENABLE_PUSH=0, INITIAL_WINDOW_SIZE=6291456, MAX_HEADER_LIST_SIZE=262144
+/// HTTP/2 SETTINGS payload that Chrome puts into ALPS for h2, the same
+/// settings the h2 interception client sends with the chrome profile
 #[cfg(boringssl)]
-const CHROME_H2_ALPS_SETTINGS: [u8; 24] = [
-    0x00, 0x01, 0x00, 0x01, 0x00, 0x00, // HEADER_TABLE_SIZE
-    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, // ENABLE_PUSH
-    0x00, 0x04, 0x00, 0x60, 0x00, 0x00, // INITIAL_WINDOW_SIZE
-    0x00, 0x06, 0x00, 0x04, 0x00, 0x00, // MAX_HEADER_LIST_SIZE
-];
+const CHROME_H2_ALPS_SETTINGS: [u8; 24] = crate::net::ChromeH2Settings::settings_payload();
 
 #[derive(Clone)]
 struct ContextPair {

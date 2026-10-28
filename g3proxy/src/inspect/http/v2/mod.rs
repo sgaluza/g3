@@ -30,6 +30,8 @@ use crate::inspect::{
 use crate::log::task::TaskEvent;
 use crate::serve::ServerTaskResult;
 
+mod client_builder;
+
 mod error;
 pub(crate) use error::{H2InterceptionError, H2StreamTransferError};
 
@@ -337,15 +339,7 @@ where
         } = self.io.take().unwrap();
 
         let http_config = self.ctx.h2_interception();
-        let mut client_builder = h2::client::Builder::new();
-        client_builder
-            .enable_push(false) // server push is deprecated by chrome and nginx
-            .max_header_list_size(http_config.max_header_list_size)
-            .max_concurrent_streams(0)
-            .max_frame_size(http_config.max_frame_size())
-            .max_send_buffer_size(http_config.max_send_buffer_size)
-            .initial_window_size(http_config.stream_window_size())
-            .initial_connection_window_size(http_config.connection_window_size());
+        let client_builder = client_builder::upstream_client_builder(http_config);
 
         let (h2s, mut h2s_connection) = match tokio::time::timeout(
             http_config.upstream_handshake_timeout,
