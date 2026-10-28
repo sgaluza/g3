@@ -610,7 +610,7 @@ The keys are:
   **optional**, **type**: bool
 
   Send the ALPS (application_settings, new codepoint) extension with Chrome's HTTP/2 SETTINGS
-  if h2 is in the ALPN list of the client.
+  if h2 is in the ALPN list offered to the upstream server, which is taken from the client.
 
   Only supported for BoringSSL.
 
