@@ -128,7 +128,8 @@ impl WebSocketNotes {
 
     #[inline]
     pub fn resource_name(&self) -> &str {
-        self.uri.path_and_query()
+        self.uri
+            .path_and_query()
             .map(|pq| pq.as_str())
             .unwrap_or_else(|| self.uri.path())
     }
