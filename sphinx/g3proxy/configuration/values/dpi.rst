@@ -753,7 +753,8 @@ The keys are:
     MAX_HEADER_LIST_SIZE 256KiB), connection window update, pseudo header order
     (:method, :authority, :scheme, :path) and HEADERS priority as Chrome sends them.
     The values of `max_header_list_size`, `max_frame_size`, `stream_window_size` and
-    `connection_window_size` are not used for the upstream connection then.
+    `connection_window_size` are not used for the upstream connection then, but still
+    apply to the h2 connection with the client.
 
   Use it together with the browser-like settings of
   :ref:`tls interception client <conf_value_dpi_tls_interception_client>`, so that the
