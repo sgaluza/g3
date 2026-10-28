@@ -15,13 +15,12 @@ const CHROME_HEADERS_PRIORITY_WEIGHT: u16 = 256;
 /// with Chrome's, so that the HTTP/2 fingerprint matches the TLS one.
 pub(super) fn upstream_client_builder(http_config: &H2InterceptionConfig) -> h2::client::Builder {
     let mut builder = h2::client::Builder::new();
-    builder
-        .enable_push(false) // server push is deprecated by chrome and nginx
-        .max_send_buffer_size(http_config.max_send_buffer_size);
+    builder.max_send_buffer_size(http_config.max_send_buffer_size);
 
     match http_config.upstream_profile {
         H2UpstreamProfile::Default => {
             builder
+                .enable_push(false) // server push is deprecated by chrome and nginx
                 .max_header_list_size(http_config.max_header_list_size)
                 .max_concurrent_streams(0)
                 .max_frame_size(http_config.max_frame_size())
@@ -32,6 +31,7 @@ pub(super) fn upstream_client_builder(http_config: &H2InterceptionConfig) -> h2:
             // no MAX_CONCURRENT_STREAMS and MAX_FRAME_SIZE: Chrome doesn't send them
             builder
                 .header_table_size(ChromeH2Settings::HEADER_TABLE_SIZE)
+                .enable_push(ChromeH2Settings::ENABLE_PUSH)
                 .initial_window_size(ChromeH2Settings::INITIAL_WINDOW_SIZE)
                 .max_header_list_size(ChromeH2Settings::MAX_HEADER_LIST_SIZE)
                 .initial_connection_window_size(ChromeH2Settings::CONNECTION_WINDOW_SIZE)
