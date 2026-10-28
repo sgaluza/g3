@@ -569,6 +569,8 @@ The keys are:
 
   Enable GREASE. See `RFC 8701`_.
 
+  For BoringSSL this also adds a GREASE value to the signature_algorithms extension, like Chrome.
+
   **default**: not set, the default value may vary between different OpenSSL variants
 
   .. versionadded:: 1.7.35
@@ -615,6 +617,32 @@ The keys are:
   Only supported for BoringSSL.
 
   **default**: false
+
+* signature_algorithms
+
+  **optional**, **type**: str
+
+  Set the signature algorithms sent in the ClientHello, as a colon separated list of TLS 1.3
+  names, e.g. ``mldsa44:ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256``. The ML-DSA names
+  (``mldsa44``, ``mldsa65``, ``mldsa87``) need a BoringSSL version that supports them.
+
+  Only supported for BoringSSL.
+
+  **default**: not set, the default list of BoringSSL is used
+
+* trust_anchor_ids
+
+  **optional**, **type**: hex str
+
+  Send the trust_anchors extension (draft-ietf-tls-trust-anchor-ids) with these trust anchor
+  IDs, in wire format: each ID prefixed by an 8-bit length, the whole list without the outer
+  16-bit length. An empty string still sends the extension with an empty list.
+
+  This only changes what is sent to the server, not certificate verification.
+
+  Only supported for BoringSSL.
+
+  **default**: not set, the extension is not sent
 
 * insecure:
 
