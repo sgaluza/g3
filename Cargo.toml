@@ -246,7 +246,7 @@ g3-yaml = { version = "0.6", path = "lib/g3-yaml" }
 # The patch is reviewed in sgaluza/h2#1 (base branch base/v0.4.12), the PR keeps this rev alive.
 # On an h2 CVE or the move to g3proxy 1.12.4 (SBRO-75) rebase the patch onto the new h2 release
 # and update the rev here; the long-term plan is to offer these options to upstream hyperium/h2.
-h2 = { git = "https://github.com/sgaluza/h2", rev = "2731926d2c2d278e0237f1746d6df82e47d2defa" }
+h2 = { git = "https://github.com/sgaluza/h2", rev = "eaa7517f0c94cb983a9b047ad92480014926bb7c" }
 
 [profile.release-lto]
 inherits = "release"
