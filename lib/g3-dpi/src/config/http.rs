@@ -3,7 +3,9 @@
  * Copyright 2023-2025 ByteDance and/or its affiliates.
  */
 
+use std::fmt;
 use std::num::NonZeroUsize;
+use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +45,23 @@ pub enum H2UpstreamProfile {
     Chrome,
 }
 
-impl std::str::FromStr for H2UpstreamProfile {
+impl H2UpstreamProfile {
+    /// Name of the profile as written in the config
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            H2UpstreamProfile::Default => "default",
+            H2UpstreamProfile::Chrome => "chrome",
+        }
+    }
+}
+
+impl fmt::Display for H2UpstreamProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for H2UpstreamProfile {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -118,5 +136,21 @@ impl H2InterceptionConfig {
 
     pub fn set_connection_window_size(&mut self, size: u32) {
         self.connection_window_size = size.max(65536);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h2_upstream_profile_display_round_trip() {
+        for profile in [H2UpstreamProfile::Default, H2UpstreamProfile::Chrome] {
+            let s = profile.to_string();
+            assert_eq!(s, profile.as_str());
+            assert_eq!(s.parse::<H2UpstreamProfile>(), Ok(profile));
+        }
+        assert_eq!(H2UpstreamProfile::Chrome.to_string(), "chrome");
+        assert_eq!(H2UpstreamProfile::Default.to_string(), "default");
     }
 }
