@@ -15,8 +15,9 @@ impl ChromeH2Settings {
     pub const INITIAL_WINDOW_SIZE: u32 = 6 * 1024 * 1024;
     /// SETTINGS_MAX_HEADER_LIST_SIZE (0x6)
     pub const MAX_HEADER_LIST_SIZE: u32 = 256 * 1024;
-    /// Connection flow-control window: the default 65535 plus the WINDOW_UPDATE
-    /// increment Chrome sends right after SETTINGS
+    /// Absolute connection flow-control window Chrome ends up with (15MiB), not an
+    /// increment: the initial 65535 plus the WINDOW_UPDATE (15663105) it sends
+    /// right after SETTINGS
     pub const CONNECTION_WINDOW_SIZE: u32 = 15 * 1024 * 1024;
 
     /// SETTINGS frame payload in the order Chrome sends it (also used for ALPS)
