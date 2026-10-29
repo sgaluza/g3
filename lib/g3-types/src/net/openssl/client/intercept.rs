@@ -102,12 +102,17 @@ impl ContextPair {
         alpn_ext: Option<&TlsAlpn>,
         browser: &BrowserClientHello,
     ) -> anyhow::Result<(Ssl, MirrorReport)> {
-        // resume a cached upstream session only if the browser resumes its own,
-        // a fresh browser with a resumed upstream session is not like a browser
-        let resume = browser.resumes_session();
-        let mut ssl = self.new_ssl(server_name, upstream, alpn_ext, resume)?;
+        let mut ssl = self.new_ssl(server_name, upstream, alpn_ext, false)?;
         let report =
             mirror::apply_browser_hello(&mut ssl, alpn_ext, browser, self.hello.enable_grease)?;
+        // resume a cached upstream session only if the browser resumes its own,
+        // a fresh browser with a resumed upstream session is not like a browser.
+        // Taken from the cache only now, so a failed mirror doesn't use one up.
+        if browser.resumes_session() {
+            if let Some(cache) = &self.session_cache {
+                cache.find_and_set_cache(&mut ssl, upstream.host(), upstream.port())?;
+            }
+        }
         Ok((ssl, report))
     }
 
