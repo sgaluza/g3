@@ -111,7 +111,11 @@ impl WebSocketNotes {
 
     pub fn serialize(&self) -> Vec<u8> {
         let mut vec = Vec::with_capacity(256);
-        vec.extend_from_slice(self.uri.path().as_bytes());
+        if let Some(pq) = self.uri.path_and_query() {
+            vec.extend_from_slice(pq.as_str().as_bytes());
+        } else {
+            vec.extend_from_slice(self.uri.path().as_bytes());
+        }
         vec.extend_from_slice(b"\r\n");
         for (name, value) in &self.headers {
             vec.extend_from_slice(name.as_str().as_bytes());
@@ -124,7 +128,10 @@ impl WebSocketNotes {
 
     #[inline]
     pub fn resource_name(&self) -> &str {
-        self.uri.path()
+        self.uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or_else(|| self.uri.path())
     }
 
     #[inline]

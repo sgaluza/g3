@@ -2191,8 +2191,7 @@ dependencies = [
 [[package]]
 name = "h2"
 version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+source = "git+https://github.com/sgaluza/h2?rev=0725c4101f25b774e39b58b90f49793aa16562b0#0725c4101f25b774e39b58b90f49793aa16562b0"
 dependencies = [
  "atomic-waker",
  "bytes",

@@ -3,7 +3,9 @@
  * Copyright 2023-2025 ByteDance and/or its affiliates.
  */
 
+use std::fmt;
 use std::num::NonZeroUsize;
+use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,8 +35,47 @@ impl Default for H1InterceptionConfig {
     }
 }
 
+/// How the h2 client to the upstream presents itself
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum H2UpstreamProfile {
+    /// Connection settings from this config, h2 default request framing
+    #[default]
+    Default,
+    /// SETTINGS, WINDOW_UPDATE, pseudo header order and HEADERS priority as Chrome
+    Chrome,
+}
+
+impl H2UpstreamProfile {
+    /// Name of the profile as written in the config
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            H2UpstreamProfile::Default => "default",
+            H2UpstreamProfile::Chrome => "chrome",
+        }
+    }
+}
+
+impl fmt::Display for H2UpstreamProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for H2UpstreamProfile {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "default" => Ok(H2UpstreamProfile::Default),
+            "chrome" => Ok(H2UpstreamProfile::Chrome),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H2InterceptionConfig {
+    pub upstream_profile: H2UpstreamProfile,
     pub max_header_list_size: u32,
     pub max_concurrent_streams: u32,
     stream_window_size: u32,
@@ -52,6 +93,7 @@ pub struct H2InterceptionConfig {
 impl Default for H2InterceptionConfig {
     fn default() -> Self {
         H2InterceptionConfig {
+            upstream_profile: H2UpstreamProfile::Default,
             max_header_list_size: 64 * 1024, // 64KB
             max_concurrent_streams: 128,
             stream_window_size: 1024 * 1024,         // 1MiB
@@ -94,5 +136,21 @@ impl H2InterceptionConfig {
 
     pub fn set_connection_window_size(&mut self, size: u32) {
         self.connection_window_size = size.max(65536);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h2_upstream_profile_display_round_trip() {
+        for profile in [H2UpstreamProfile::Default, H2UpstreamProfile::Chrome] {
+            let s = profile.to_string();
+            assert_eq!(s, profile.as_str());
+            assert_eq!(s.parse::<H2UpstreamProfile>(), Ok(profile));
+        }
+        assert_eq!(H2UpstreamProfile::Chrome.to_string(), "chrome");
+        assert_eq!(H2UpstreamProfile::Default.to_string(), "default");
     }
 }

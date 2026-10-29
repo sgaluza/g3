@@ -585,6 +585,37 @@ The keys are:
 
   .. versionadded:: 1.7.36
 
+* cipher_list
+
+  **optional**, **type**: str
+
+  Set the cipher list for TLS 1.2 and below, in OpenSSL cipher string format.
+  TLS 1.3 cipher suites are not affected.
+  TLCP connections (Tongsuo) are not affected either, as they use their own SM cipher suites.
+
+  **default**: not set, the default list of the OpenSSL variant is used
+
+* enable_ech_grease
+
+  **optional**, **type**: bool
+
+  Send a GREASE ECH (encrypted_client_hello) extension, like Chrome does when no ECH config is known.
+
+  Only supported for BoringSSL.
+
+  **default**: false
+
+* enable_alps
+
+  **optional**, **type**: bool
+
+  Send the ALPS (application_settings, new codepoint) extension with Chrome's HTTP/2 SETTINGS
+  if h2 is in the ALPN list offered to the upstream server, which is taken from the client.
+
+  Only supported for BoringSSL.
+
+  **default**: false
+
 * insecure:
 
   **optional**, **type**: bool
@@ -710,6 +741,31 @@ h2 interception
 Set the config for HTTP 2.0 interception.
 
 The keys are:
+
+* upstream_profile
+
+  **optional**, **type**: str
+
+  Set how the h2 client to the upstream server presents itself. The values are:
+
+  - default: SETTINGS and window sizes from the keys below.
+  - chrome: SETTINGS (HEADER_TABLE_SIZE 65536, ENABLE_PUSH 0, INITIAL_WINDOW_SIZE 6MiB,
+    MAX_HEADER_LIST_SIZE 256KiB), connection window update, pseudo header order
+    (:method, :authority, :scheme, :path) and HEADERS priority as Chrome sends them.
+    The values of `max_header_list_size`, `max_frame_size`, `stream_window_size` and
+    `connection_window_size` are not used for the upstream connection then, but still
+    apply to the h2 connection with the client.
+
+  Use it together with the browser-like settings of
+  :ref:`tls interception client <conf_value_dpi_tls_interception_client>`, so that the
+  HTTP/2 fingerprint matches the TLS one.
+
+  .. note:: The chrome profile uses Chrome's flow-control windows towards the upstream:
+     6MiB per stream and 15MiB per connection, instead of 1MiB and 2MiB by default.
+     If the client reads slower than the upstream sends, the interception may buffer up
+     to these sizes per connection, so expect higher memory usage.
+
+  **default**: default
 
 * max_header_list_size
 

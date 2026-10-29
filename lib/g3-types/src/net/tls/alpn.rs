@@ -175,6 +175,23 @@ impl TlsAlpn {
         TlsAlpn { raw_list: new }
     }
 
+    /// Check if the protocol is in the list, without allocating
+    pub fn contains(&self, protocol: &[u8]) -> bool {
+        let mut offset = 0usize;
+        while offset < self.raw_list.len() {
+            let start = offset + 1;
+            let end = start + self.raw_list[offset] as usize;
+            let Some(name) = self.raw_list.get(start..end) else {
+                return false;
+            };
+            if name == protocol {
+                return true;
+            }
+            offset = end;
+        }
+        false
+    }
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.raw_list.is_empty()
@@ -197,5 +214,18 @@ mod tests {
         let alpn2 = TlsAlpn::from_extension_value(v).unwrap();
 
         assert_eq!(filtered, alpn2);
+    }
+
+    #[test]
+    fn contains() {
+        let alpn = TlsAlpn::from_extension_value(b"\x00\x0C\x02h2\x08http/1.1").unwrap();
+        assert!(alpn.contains(b"h2"));
+        assert!(alpn.contains(b"http/1.1"));
+        assert!(!alpn.contains(b"h3"));
+        // prefix of a longer protocol name must not match
+        assert!(!alpn.contains(b"http"));
+
+        let alpn = TlsAlpn::from_extension_value(b"\x00\x09\x08http/1.1").unwrap();
+        assert!(!alpn.contains(b"h2"));
     }
 }
