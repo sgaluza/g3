@@ -628,6 +628,47 @@ mod tests {
         u16::from_be_bytes([buf[offset], buf[offset + 1]])
     }
 
+    #[test]
+    fn is_grease_values() {
+        // RFC 8701: 0x?A?A with equal bytes
+        for v in [0x0a0a, 0x1a1a, 0xfafa] {
+            assert!(is_grease(v), "{v:04x}");
+        }
+        for v in [0x0a1a, 0x1a0a, 0x0a0b, 0x0000, 0x00ff] {
+            assert!(!is_grease(v), "{v:04x}");
+        }
+    }
+
+    #[test]
+    fn parse_client_hello_fixture() {
+        // ClientHello body: legacy_version, random, session id of 3 bytes,
+        // cipher suites with GREASE and SCSV, one compression method,
+        // extensions: GREASE (empty), server_name (5 bytes), 0xca34 (empty)
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&[0u8; 32]);
+        body.extend_from_slice(&[0x03, 0xaa, 0xbb, 0xcc]);
+        body.extend_from_slice(&[0x00, 0x08, 0x2a, 0x2a, 0x13, 0x01, 0xc0, 0x2b, 0x00, 0xff]);
+        body.extend_from_slice(&[0x01, 0x00]);
+        let exts = [
+            0x3a, 0x3a, 0x00, 0x00, // GREASE
+            0x00, 0x00, 0x00, 0x05, 0x00, 0x03, 0x00, 0x00, 0x00, // server_name
+            0xca, 0x34, 0x00, 0x00, // trust_anchors
+        ];
+        body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+        body.extend_from_slice(&exts);
+
+        let mut handshake = vec![0x01, 0x00];
+        handshake.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        handshake.extend_from_slice(&body);
+        let mut record = vec![0x16, 0x03, 0x01];
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+
+        let hello = parse_client_hello(&record);
+        assert_eq!(hello.cipher_suites, [0x1301, 0xc02b]);
+        assert_eq!(hello.extensions, [0x0000, 0xca34]);
+    }
+
     /// TLS_EMPTY_RENEGOTIATION_INFO_SCSV, a signaling value OpenSSL adds to the cipher list
     const RENEGOTIATION_INFO_SCSV: u16 = 0x00ff;
 
