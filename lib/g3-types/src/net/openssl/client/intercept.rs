@@ -1806,6 +1806,7 @@ mod tests {
     #[cfg(boringssl)]
     fn mirror_reports_duplicates_once() {
         let mut browser = browser_hello(CHROME_156_CLIENT_HELLO);
+        browser.cipher_suites.push(0xc02b);
         browser.groups.push(0x001d);
         browser.signature_algorithms.push(0x0403);
         let (record, report) = capture_mirror_record(
@@ -1815,8 +1816,13 @@ mod tests {
             Some(&browser),
         );
 
+        assert_eq!(report.dropped_cipher_suites, [0xc02b]);
         assert_eq!(report.dropped_groups, [0x001d]);
         assert_eq!(report.dropped_signature_algorithms, [0x0403]);
+        assert_eq!(
+            parse_client_hello(&record).cipher_suites,
+            CHROME_156_CIPHER_SUITES
+        );
         assert_eq!(parse_client_hello(&record).ja4(), CHROME_156_JA4);
     }
 

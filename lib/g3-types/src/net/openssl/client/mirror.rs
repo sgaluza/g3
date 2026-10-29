@@ -200,10 +200,17 @@ fn set_cipher_suites(
     report: &mut MirrorReport,
 ) -> anyhow::Result<()> {
     let mut names = Vec::new();
+    let mut seen = Vec::with_capacity(suites.len());
     for &id in suites {
         if SIGNALING_CIPHER_SUITES.contains(&id) {
             continue;
         }
+        // a repeated value can't be sent twice, so it's dropped as well
+        if seen.contains(&id) {
+            report.dropped_cipher_suites.push(id);
+            continue;
+        }
+        seen.push(id);
         // SAFETY: a lookup in the static cipher table, no pointer arguments
         let cipher = unsafe { openssl_sys::SSL_get_cipher_by_value(id) };
         if cipher.is_null() {
