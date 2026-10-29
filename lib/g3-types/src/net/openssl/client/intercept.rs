@@ -213,14 +213,25 @@ impl OpensslInterceptionClientConfig {
         alpn_ext: Option<&TlsAlpn>,
         browser: Option<&BrowserClientHello>,
     ) -> anyhow::Result<(Ssl, MirrorReport)> {
+        if !self.mirror_client_hello() {
+            let ssl = self.build_ssl(server_name, upstream, alpn_ext)?;
+            return Ok((ssl, MirrorReport::default()));
+        }
         match browser {
-            Some(b) if self.mirror_client_hello() => mirror_or_static(
+            Some(b) => mirror_or_static(
                 self.ssl_context_pair
                     .build_mirror_ssl(server_name, upstream, alpn_ext, b),
                 || self.static_fallback_ssl(server_name, upstream, alpn_ext, b),
             ),
-            _ => {
-                let ssl = self.build_ssl(server_name, upstream, alpn_ext)?;
+            // the ClientHello couldn't be parsed, so it's unknown whether the client
+            // resumes a session: don't resume the upstream one either
+            None => {
+                let ssl = self.ssl_context_pair.build_static_ssl(
+                    server_name,
+                    upstream,
+                    alpn_ext,
+                    false,
+                )?;
                 Ok((ssl, MirrorReport::default()))
             }
         }
@@ -1766,6 +1777,22 @@ mod tests {
             .static_fallback_ssl(None, &test_upstream(), None, &resuming)
             .unwrap();
         assert!(browser_hello(&capture_ssl(ssl)).resumes_session());
+    }
+
+    /// With mirroring on and a ClientHello that couldn't be parsed it's unknown whether
+    /// the client resumes, so the upstream connection makes a full handshake
+    #[test]
+    #[cfg(boringssl)]
+    fn mirror_without_browser_hello_does_not_resume() {
+        let mut builder = mirror_builder();
+        builder.set_insecure(true);
+        let config = builder.build().unwrap();
+        prime_session_cache(&config);
+
+        let (record, report) =
+            capture_record_with_config(&config, &["h2"], Some("www.example.com"), None);
+        assert!(!browser_hello(&record).resumes_session());
+        assert!(report.is_empty());
     }
 
     /// Without mirroring the cached session is resumed as before
