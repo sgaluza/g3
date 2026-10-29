@@ -763,9 +763,15 @@ mod tests {
         /// u16 values of a list extension body with the given length prefix size
         fn u16_list(&self, ext_type: u16, len_prefix: usize) -> Vec<u16> {
             let data = self.extension(ext_type).unwrap_or_default();
-            data.get(len_prefix..)
-                .unwrap_or_default()
-                .chunks(2)
+            let values = data.get(len_prefix..).unwrap_or_default();
+            // a truncated value means broken test data, fail loudly instead of dropping it
+            assert!(
+                values.len() & 1 == 0,
+                "extension {ext_type:04x}: odd length {} of u16 values",
+                values.len()
+            );
+            values
+                .chunks_exact(2)
                 .map(|c| u16::from_be_bytes([c[0], c[1]]))
                 .collect()
         }
