@@ -155,7 +155,12 @@ pub(super) fn apply_browser_hello(
 
     set_cipher_suites(ssl, &browser.cipher_suites, &mut report)?;
     let groups = set_groups(ssl, &browser.groups, &mut report)?;
-    if !groups.is_empty() {
+    if groups.is_empty() {
+        // with the static groups the browser key shares can't be sent
+        report
+            .dropped_key_share_groups
+            .extend_from_slice(&browser.key_share_groups);
+    } else {
         set_key_shares(ssl, &groups, &browser.key_share_groups, &mut report)?;
     }
     set_signature_algorithms(ssl, &browser.signature_algorithms, &mut report)?;
@@ -264,7 +269,9 @@ fn set_groups(
     Ok(known)
 }
 
-/// Send key shares for the browser key_share groups, which must keep the group order
+/// Send key shares for the browser key_share groups. RFC 8446 §4.2.8 wants them in
+/// the supported_groups order and BoringSSL checks it (`validate_key_shares`), so
+/// entries out of that order are dropped rather than reordered
 fn set_key_shares(
     ssl: &mut Ssl,
     groups: &[u16],
