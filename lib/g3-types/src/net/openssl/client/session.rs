@@ -215,15 +215,35 @@ impl OpensslClientSessionCache {
         tls_name: &Host,
         port: u16,
     ) -> anyhow::Result<()> {
+        self.set_cache(ssl, tls_name, port, true)
+    }
+
+    /// Only set where new sessions of `ssl` are cached, without resuming a cached one
+    #[cfg(boringssl)]
+    pub(in crate::net::openssl) fn set_cache_key(
+        &self,
+        ssl: &mut Ssl,
+        tls_name: &Host,
+        port: u16,
+    ) -> anyhow::Result<()> {
+        self.set_cache(ssl, tls_name, port, false)
+    }
+
+    fn set_cache(
+        &self,
+        ssl: &mut Ssl,
+        tls_name: &Host,
+        port: u16,
+        resume: bool,
+    ) -> anyhow::Result<()> {
         if let Some(caches) = ssl.ssl_context().ex_data(self.session_cache_index) {
             let session = match caches {
-                SessionCaches::One(m) => {
-                    let mut o = m.lock().unwrap();
-                    o.pop()
-                }
+                SessionCaches::One(m) => resume.then(|| m.lock().unwrap().pop()).flatten(),
                 SessionCaches::Many(m) => {
                     let key = format!("[{tls_name}]:{port}");
-                    let session = m.lock().unwrap().peek_mut(&key).and_then(|m| m.pop());
+                    let session = resume
+                        .then(|| m.lock().unwrap().peek_mut(&key).and_then(|m| m.pop()))
+                        .flatten();
                     ssl.set_ex_data(self.session_key_index, key);
                     session
                 }

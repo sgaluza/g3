@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use bytes::BytesMut;
+use log::warn;
 use openssl::x509::X509VerifyResult;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::runtime::Handle;
@@ -21,8 +22,8 @@ use g3_dpi::{Protocol, ProtocolInspector};
 use g3_io_ext::{AsyncStream, FlexBufReader, OnceBufReader};
 use g3_slog_types::{LtUpstreamAddr, LtUuid, LtX509VerifyResult};
 use g3_types::net::{
-    AlpnProtocol, OpensslInterceptionClientConfig, OpensslInterceptionServerConfig, TlsAlpn,
-    TlsServerName, UpstreamAddr,
+    AlpnProtocol, BrowserClientHello, OpensslInterceptionClientConfig,
+    OpensslInterceptionServerConfig, TlsAlpn, TlsServerName, UpstreamAddr,
 };
 use g3_udpdump::{
     ExportedPduDissectorHint, StreamDumpConfig, StreamDumpProxyAddresses, StreamDumper,
@@ -46,10 +47,12 @@ pub(super) struct ParsedClientHello {
     pub(super) version: RawVersion,
     pub(super) sni: Option<TlsServerName>,
     pub(super) alpn: Option<TlsAlpn>,
+    /// Set if `mirror_client_hello` is enabled and the ClientHello could be parsed for it
+    pub(super) browser: Option<BrowserClientHello>,
 }
 
 impl ParsedClientHello {
-    pub(super) fn parse(ch: ClientHello<'_>) -> anyhow::Result<Self> {
+    pub(super) fn parse(ch: ClientHello<'_>, mirror: bool) -> anyhow::Result<Self> {
         let mut sni: Option<TlsServerName> = None;
         let mut alpn: Option<TlsAlpn> = None;
 
@@ -74,10 +77,23 @@ impl ParsedClientHello {
             }
         }
 
+        // a ClientHello the mirror can't parse still goes upstream, with the static one
+        let browser = if mirror {
+            BrowserClientHello::parse(ch.cipher_suites, ch.extensions)
+                .inspect_err(|e| {
+                    let sni = sni.as_ref().map(|n| n.as_ref()).unwrap_or("-");
+                    warn!("can't mirror ClientHello for SNI {sni}, using the static one: {e}");
+                })
+                .ok()
+        } else {
+            None
+        };
+
         Ok(ParsedClientHello {
             version: ch.legacy_version,
             sni,
             alpn,
+            browser,
         })
     }
 }
@@ -177,6 +193,7 @@ impl TlsInterceptionContext {
         let mut handshake_coalescer =
             HandshakeCoalescer::new(self.server_config.client_hello_max_size);
         let mut record_offset = 0;
+        let mirror = self.client_config.mirror_client_hello();
 
         loop {
             let mut record = match Record::parse(&clt_r_buf[record_offset..]) {
@@ -207,10 +224,10 @@ impl TlsInterceptionContext {
                     let ch = handshake_msg
                         .parse_client_hello()
                         .map_err(|_| anyhow!("invalid tls client hello request"))?;
-                    return ParsedClientHello::parse(ch);
+                    return ParsedClientHello::parse(ch, mirror);
                 }
                 Ok(None) => match handshake_coalescer.parse_client_hello() {
-                    Ok(Some(ch)) => return ParsedClientHello::parse(ch),
+                    Ok(Some(ch)) => return ParsedClientHello::parse(ch, mirror),
                     Ok(None) => {
                         if !record.consume_done() {
                             return Err(anyhow!("partial fragmented tls client hello request"));
