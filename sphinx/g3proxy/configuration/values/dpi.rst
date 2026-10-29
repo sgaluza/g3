@@ -625,6 +625,7 @@ The keys are:
   Set the signature algorithms sent in the ClientHello, as a colon separated list of TLS 1.3
   names, e.g. ``mldsa44:ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256``. The ML-DSA names
   (``mldsa44``, ``mldsa65``, ``mldsa87``) need a BoringSSL version that supports them.
+  Unknown names are rejected when the config is loaded, also by ``g3proxy -t``.
 
   Only supported for BoringSSL.
 
@@ -636,7 +637,9 @@ The keys are:
 
   Send the trust_anchors extension (draft-ietf-tls-trust-anchor-ids) with these trust anchor
   IDs, in wire format: each ID prefixed by an 8-bit length, the whole list without the outer
-  16-bit length. An empty string still sends the extension with an empty list.
+  16-bit length. An empty string still sends the extension with an empty list. An empty ID or
+  a length past the end of the list is rejected when the config is loaded, also by
+  ``g3proxy -t``.
 
   This only changes what is sent to the server, not certificate verification.
 
