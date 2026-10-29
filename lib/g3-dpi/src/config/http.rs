@@ -43,6 +43,8 @@ pub enum H2UpstreamProfile {
     Default,
     /// SETTINGS, WINDOW_UPDATE, pseudo header order and HEADERS priority as Chrome
     Chrome,
+    /// The same as the client's first flight, Chrome values for what it didn't send
+    Mirror,
 }
 
 impl H2UpstreamProfile {
@@ -51,6 +53,7 @@ impl H2UpstreamProfile {
         match self {
             H2UpstreamProfile::Default => "default",
             H2UpstreamProfile::Chrome => "chrome",
+            H2UpstreamProfile::Mirror => "mirror",
         }
     }
 }
@@ -68,6 +71,7 @@ impl FromStr for H2UpstreamProfile {
         match s.to_ascii_lowercase().as_str() {
             "default" => Ok(H2UpstreamProfile::Default),
             "chrome" => Ok(H2UpstreamProfile::Chrome),
+            "mirror" => Ok(H2UpstreamProfile::Mirror),
             _ => Err(()),
         }
     }

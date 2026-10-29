@@ -17,7 +17,8 @@ use crate::net::TlsAlpn;
 
 /// HTTP/2 SETTINGS payload that Chrome puts into ALPS for h2, the same
 /// settings the h2 interception client sends with the chrome profile
-const CHROME_H2_ALPS_SETTINGS: [u8; 24] = crate::net::ChromeH2Settings::settings_payload();
+pub(super) const CHROME_H2_ALPS_SETTINGS: [u8; 24] =
+    crate::net::ChromeH2Settings::settings_payload();
 
 /// Extensions the upstream ClientHello sends when the browser does
 /// (some always, some by the settings copied here)
@@ -51,17 +52,14 @@ const TLS1_3_VERSION: u16 = 0x0304;
 /// TLS_EMPTY_RENEGOTIATION_INFO_SCSV and TLS_FALLBACK_SCSV, added by the library itself
 const SIGNALING_CIPHER_SUITES: [u16; 2] = [0x00ff, 0x5600];
 
-/// Add ALPS for `proto` (with Chrome's h2 SETTINGS for h2, empty otherwise)
+/// Add ALPS for `proto`: `h2_settings` (a SETTINGS payload) for h2, empty otherwise
 pub(super) fn add_application_settings(
     ssl: &mut Ssl,
     proto: &[u8],
     new_codepoint: bool,
+    h2_settings: &[u8],
 ) -> anyhow::Result<()> {
-    let settings: &[u8] = if proto == b"h2" {
-        &CHROME_H2_ALPS_SETTINGS
-    } else {
-        &[]
-    };
+    let settings: &[u8] = if proto == b"h2" { h2_settings } else { &[] };
     let ssl_ptr = ssl.as_ptr();
     // SAFETY: ssl_ptr is valid, BoringSSL copies both buffers before returning
     let r = unsafe {
@@ -142,12 +140,14 @@ fn clear_errors() {
 
 /// Copy the browser ClientHello to `ssl`. Values BoringSSL doesn't know are
 /// dropped; a list with nothing left keeps the static value of the SSL_CTX.
-/// `enable_grease` is the static GREASE setting, which only exists on SSL_CTX.
+/// `enable_grease` is the static GREASE setting, which only exists on SSL_CTX;
+/// `h2_settings` is the SETTINGS payload sent in ALPS for h2.
 pub(super) fn apply_browser_hello(
     ssl: &mut Ssl,
     alpn_ext: Option<&TlsAlpn>,
     browser: &BrowserClientHello,
     enable_grease: bool,
+    h2_settings: &[u8],
 ) -> anyhow::Result<MirrorReport> {
     let mut report = MirrorReport {
         grease_mismatch: browser.grease != enable_grease,
@@ -173,7 +173,7 @@ pub(super) fn apply_browser_hello(
         if added.contains(&proto.as_slice()) {
             continue;
         }
-        add_application_settings(ssl, proto, browser.alps_new_codepoint)?;
+        add_application_settings(ssl, proto, browser.alps_new_codepoint, h2_settings)?;
         added.push(proto);
     }
     set_ech_grease(ssl, browser.ech);

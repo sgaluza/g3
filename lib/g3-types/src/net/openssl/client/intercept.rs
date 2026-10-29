@@ -3,6 +3,8 @@
  * Copyright 2023-2025 ByteDance and/or its affiliates.
  */
 
+#[cfg(boringssl)]
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -31,6 +33,20 @@ struct StaticHello {
     enable_alps: bool,
     trust_anchor_ids: Option<Vec<u8>>,
     mirror_client_hello: bool,
+    /// SETTINGS payload last seen from the client by the h2 interception, sent in
+    /// the ALPS of the next connections; shared by all clones of the config
+    h2_settings: Arc<RwLock<Option<Vec<u8>>>>,
+}
+
+#[cfg(boringssl)]
+impl StaticHello {
+    /// SETTINGS payload for ALPS: the remembered one of the client, or Chrome's
+    fn h2_settings(&self) -> Vec<u8> {
+        let learned = self.h2_settings.read().unwrap_or_else(|e| e.into_inner());
+        learned
+            .clone()
+            .unwrap_or_else(|| mirror::CHROME_H2_ALPS_SETTINGS.to_vec())
+    }
 }
 
 #[derive(Clone)]
@@ -61,7 +77,7 @@ impl ContextPair {
         }
         let offers_h2 = alpn_ext.is_some_and(|alpn| alpn.contains(b"h2"));
         if hello.enable_alps && offers_h2 {
-            mirror::add_application_settings(ssl, b"h2", true)?;
+            mirror::add_application_settings(ssl, b"h2", true, &hello.h2_settings())?;
         }
         Ok(())
     }
@@ -103,8 +119,13 @@ impl ContextPair {
         browser: &BrowserClientHello,
     ) -> anyhow::Result<(Ssl, MirrorReport)> {
         let mut ssl = self.new_ssl(server_name, upstream, alpn_ext, false)?;
-        let report =
-            mirror::apply_browser_hello(&mut ssl, alpn_ext, browser, self.hello.enable_grease)?;
+        let report = mirror::apply_browser_hello(
+            &mut ssl,
+            alpn_ext,
+            browser,
+            self.hello.enable_grease,
+            &self.hello.h2_settings(),
+        )?;
         // resume a cached upstream session only if the browser resumes its own,
         // a fresh browser with a resumed upstream session is not like a browser.
         // Taken from the cache only now, so a failed mirror doesn't use one up.
@@ -199,6 +220,26 @@ impl OpensslInterceptionClientConfig {
 
     #[cfg(not(boringssl))]
     pub fn mirror_client_hello(&self) -> bool {
+        false
+    }
+
+    /// Remember the HTTP/2 SETTINGS payload of the client, to send it in the ALPS
+    /// of the next upstream connections instead of Chrome's. Returns whether the
+    /// ALPS payload changed, so connections opened before had other SETTINGS.
+    #[cfg(boringssl)]
+    pub fn remember_h2_settings(&self, payload: &[u8]) -> bool {
+        let hello = &self.ssl_context_pair.hello;
+        if hello.h2_settings() == payload {
+            return false;
+        }
+        let mut learned = hello.h2_settings.write().unwrap_or_else(|e| e.into_inner());
+        *learned = Some(payload.to_vec());
+        true
+    }
+
+    /// ALPS is only sent with BoringSSL
+    #[cfg(not(boringssl))]
+    pub fn remember_h2_settings(&self, _payload: &[u8]) -> bool {
         false
     }
 
@@ -694,6 +735,7 @@ impl OpensslInterceptionClientConfigBuilder {
                 enable_alps: self.enable_alps,
                 trust_anchor_ids: self.trust_anchor_ids.clone(),
                 mirror_client_hello: self.mirror_client_hello,
+                h2_settings: Arc::new(RwLock::new(None)),
             },
         })
     }
@@ -1879,5 +1921,105 @@ mod tests {
     fn mirror_flag_reaches_config() {
         let config = mirror_builder().build().unwrap();
         assert!(config.mirror_client_hello());
+    }
+
+    /// SETTINGS payload of another client than Chrome: 1:65536;4:131072;5:16384
+    #[cfg(boringssl)]
+    const OTHER_H2_SETTINGS: [u8; 18] = [
+        0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x00, 0x00, 0x00, 0x05, 0x00,
+        0x00, 0x40, 0x00,
+    ];
+
+    /// Full TLS 1.3 handshake of `ssl` against a local server that negotiates h2
+    /// and ALPS, returns the ALPS settings the server got from the client
+    #[cfg(boringssl)]
+    fn server_sees_alps(ssl: Ssl) -> Vec<u8> {
+        use std::net::{TcpListener, TcpStream};
+
+        use openssl::foreign_types::ForeignTypeRef;
+        use openssl::ssl::{AlpnError, select_next_proto};
+
+        let (cert, key) = test_server_cert();
+        let mut server_ctx = SslContextBuilder::new(SslMethod::tls_server()).unwrap();
+        server_ctx.set_certificate(&cert).unwrap();
+        server_ctx.set_private_key(&key).unwrap();
+        server_ctx.set_alpn_select_callback(|_, client| {
+            select_next_proto(b"\x02h2", client).ok_or(AlpnError::NOACK)
+        });
+        let server_ctx = server_ctx.build();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            let mut ssl = Ssl::new(&server_ctx).unwrap();
+            mirror::add_application_settings(&mut ssl, b"h2", true, &[]).unwrap();
+            let tls = ssl.accept(tcp).unwrap();
+            let mut ptr = std::ptr::null();
+            let mut len = 0usize;
+            // SAFETY: valid SSL, out pointers point to locals
+            unsafe {
+                openssl_sys::SSL_get0_peer_application_settings(
+                    tls.ssl().as_ptr(),
+                    &mut ptr,
+                    &mut len,
+                )
+            };
+            assert!(!ptr.is_null(), "no ALPS from the client");
+            // SAFETY: BoringSSL returned `len` bytes at `ptr`, alive with `tls`
+            unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
+        });
+
+        let _tls = ssl.connect(TcpStream::connect(addr).unwrap()).unwrap();
+        server.join().unwrap()
+    }
+
+    #[cfg(boringssl)]
+    fn h2_alpn() -> TlsAlpn {
+        TlsAlpn::from_extension_value(b"\x00\x03\x02h2").unwrap()
+    }
+
+    /// The ALPS of later upstream connections carries the SETTINGS the h2
+    /// interception last saw from the client, Chrome's before that
+    #[test]
+    #[cfg(boringssl)]
+    fn static_alps_uses_remembered_h2_settings() {
+        let mut builder = chrome_like_builder();
+        builder.set_insecure(true);
+        let config = builder.build().unwrap();
+        let alpn = h2_alpn();
+
+        let ssl = config
+            .build_ssl(None, &test_upstream(), Some(&alpn))
+            .unwrap();
+        assert_eq!(
+            server_sees_alps(ssl),
+            crate::net::ChromeH2Settings::settings_payload()
+        );
+
+        // Chrome's SETTINGS are what ALPS had already, the others change it
+        let chrome = crate::net::ChromeH2Settings::settings_payload();
+        assert!(!config.remember_h2_settings(&chrome));
+        assert!(config.remember_h2_settings(&OTHER_H2_SETTINGS));
+        assert!(!config.remember_h2_settings(&OTHER_H2_SETTINGS));
+        let ssl = config
+            .build_ssl(None, &test_upstream(), Some(&alpn))
+            .unwrap();
+        assert_eq!(server_sees_alps(ssl), OTHER_H2_SETTINGS);
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn mirror_alps_uses_remembered_h2_settings() {
+        let mut builder = mirror_builder();
+        builder.set_insecure(true);
+        let config = builder.build().unwrap();
+        let alpn = h2_alpn();
+        let browser = browser_hello(CHROME_156_CLIENT_HELLO);
+
+        config.remember_h2_settings(&OTHER_H2_SETTINGS);
+        let (ssl, _) = config
+            .build_mirror_ssl(None, &test_upstream(), Some(&alpn), Some(&browser))
+            .unwrap();
+        assert_eq!(server_sees_alps(ssl), OTHER_H2_SETTINGS);
     }
 }

@@ -10,11 +10,12 @@ use std::time::Duration;
 use async_recursion::async_recursion;
 use bytes::Bytes;
 use h2::{Reason, server::Connection};
+use log::{debug, warn};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::oneshot;
 
 use g3_daemon::server::ServerQuitPolicy;
-use g3_dpi::{Protocol, ProtocolInspectAction};
+use g3_dpi::{H2UpstreamProfile, Protocol, ProtocolInspectAction};
 use g3_h2::H2BodyTransfer;
 use g3_io_ext::{IdleInterval, OnceBufReader, StreamCopyConfig};
 use g3_slog_types::{LtUpstreamAddr, LtUuid};
@@ -31,6 +32,11 @@ use crate::log::task::TaskEvent;
 use crate::serve::ServerTaskResult;
 
 mod client_builder;
+mod preface;
+
+/// The client first flight is read up to this size: far more than a preface,
+/// SETTINGS, WINDOW_UPDATE and a request HEADERS take
+const MAX_CLIENT_PREFACE_SIZE: usize = 64 * 1024;
 
 mod error;
 pub(crate) use error::{H2InterceptionError, H2StreamTransferError};
@@ -339,7 +345,38 @@ where
         } = self.io.take().unwrap();
 
         let http_config = self.ctx.h2_interception();
-        let client_builder = client_builder::upstream_client_builder(http_config);
+        // the mirror profile needs the client first flight before the upstream handshake
+        let (clt_r, client_preface) = if http_config.upstream_profile == H2UpstreamProfile::Mirror {
+            match tokio::time::timeout(
+                http_config.client_handshake_timeout,
+                preface::read_client_preface(clt_r, MAX_CLIENT_PREFACE_SIZE),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(_) => return Err(H2InterceptionError::ClientHandshakeTimeout),
+            }
+        } else {
+            (clt_r, None)
+        };
+        if let (Some(p), Some(tls)) = (&client_preface, self.ctx.tls_interception()) {
+            // the TLS of this connection is done already: its ALPS had the old SETTINGS
+            if tls.remember_h2_settings(&p.settings_payload()) {
+                warn!(
+                    "h2 SETTINGS of the client changed, ALPS to {} had other ones; \
+                     next connections send the new ones",
+                    self.upstream
+                );
+            }
+        }
+
+        let (client_builder, report) =
+            client_builder::upstream_client_builder(http_config, client_preface.as_ref());
+        if report.is_notable() {
+            warn!("h2 to {} differs from the client: {report}", self.upstream);
+        } else if !report.is_empty() {
+            debug!("h2 to {}: {report}", self.upstream);
+        }
 
         let (h2s, mut h2s_connection) = match tokio::time::timeout(
             http_config.upstream_handshake_timeout,

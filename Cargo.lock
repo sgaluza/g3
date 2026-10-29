@@ -2191,7 +2191,7 @@ dependencies = [
 [[package]]
 name = "h2"
 version = "0.4.15"
-source = "git+https://github.com/sgaluza/h2?rev=0725c4101f25b774e39b58b90f49793aa16562b0#0725c4101f25b774e39b58b90f49793aa16562b0"
+source = "git+https://github.com/sgaluza/h2?rev=9112bc75da1f7e17e5a02ad296b67430fbf714cb#9112bc75da1f7e17e5a02ad296b67430fbf714cb"
 dependencies = [
  "atomic-waker",
  "bytes",

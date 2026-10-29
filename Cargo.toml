@@ -240,15 +240,16 @@ g3-xcrypt = { version = "0.3", path = "lib/g3-xcrypt" }
 g3-yaml = { version = "0.6", path = "lib/g3-yaml" }
 
 [patch.crates-io]
-# h2 0.4.15 + Chrome-like request HEADERS (SBRO-77): client::Builder::pseudo_header_authority_first
-# and headers_priority. Both are off by default, so other h2 users in the workspace see plain 0.4.15;
-# only the chrome h2_interception.upstream_profile turns them on.
-# The patch is reviewed in sgaluza/h2#1 (on 0.4.12) and sgaluza/h2#2 (rebased onto 0.4.15, base
-# branch base/v0.4.15, SBRO-75); the PR keeps this rev alive.
+# h2 0.4.15 + browser-like request HEADERS: client::Builder::pseudo_header_authority_first and
+# headers_priority (SBRO-77), pseudo_header_order (SBRO-80). All are off by default, so other h2
+# users in the workspace see plain 0.4.15; only the chrome and mirror
+# h2_interception.upstream_profile turn them on.
+# The patch is reviewed in sgaluza/h2#1 (on 0.4.12), sgaluza/h2#2 (rebased onto 0.4.15, base
+# branch base/v0.4.15, SBRO-75) and sgaluza/h2#3 (pseudo_header_order); the PRs keep this rev alive.
 # When the h2 version in Cargo.lock moves (an h2 CVE, a g3proxy upstream update) rebase the patch
 # onto that h2 release and update the rev here; the long-term plan is to offer these options to
 # upstream hyperium/h2.
-h2 = { git = "https://github.com/sgaluza/h2", rev = "0725c4101f25b774e39b58b90f49793aa16562b0" }
+h2 = { git = "https://github.com/sgaluza/h2", rev = "9112bc75da1f7e17e5a02ad296b67430fbf714cb" }
 
 [profile.release-lto]
 inherits = "release"

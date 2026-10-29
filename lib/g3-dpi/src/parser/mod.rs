@@ -3,6 +3,7 @@
  * Copyright 2024-2025 ByteDance and/or its affiliates.
  */
 
+pub mod h2;
 pub mod tls;
 
 #[cfg(feature = "quic")]

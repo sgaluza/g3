@@ -144,6 +144,12 @@ impl TlsInterceptionContext {
         })
     }
 
+    /// Send these client HTTP/2 SETTINGS in the ALPS of the next upstream
+    /// connections, true if they differ from what ALPS carried so far
+    pub(crate) fn remember_h2_settings(&self, payload: &[u8]) -> bool {
+        self.client_config.remember_h2_settings(payload)
+    }
+
     pub(super) fn get_stream_dumper(&self, worker_id: Option<usize>) -> Option<&StreamDumper> {
         if self.stream_dumper.is_empty() {
             return None;
