@@ -166,8 +166,14 @@ pub(super) fn apply_browser_hello(
     set_signature_algorithms(ssl, &browser.signature_algorithms, &mut report)?;
 
     let upstream_alpn = |p: &[u8]| alpn_ext.is_some_and(|alpn| alpn.contains(p));
+    // BoringSSL would send a repeated protocol twice
+    let mut added: Vec<&[u8]> = Vec::new();
     for proto in browser.alps_protocols.iter().filter(|p| upstream_alpn(p)) {
+        if added.contains(&proto.as_slice()) {
+            continue;
+        }
         add_application_settings(ssl, proto, browser.alps_new_codepoint)?;
+        added.push(proto);
     }
     set_ech_grease(ssl, browser.ech);
     if let Some(ids) = &browser.trust_anchors {

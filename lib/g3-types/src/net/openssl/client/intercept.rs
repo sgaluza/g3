@@ -1597,6 +1597,22 @@ mod tests {
         assert_eq!(report.dropped_key_share_groups, [0x11ec, 0x001d]);
     }
 
+    /// A protocol repeated in the browser ALPS list goes upstream once
+    #[test]
+    #[cfg(boringssl)]
+    fn mirror_sends_repeated_alps_protocol_once() {
+        let mut browser = browser_hello(CHROME_156_CLIENT_HELLO);
+        browser.alps_protocols = vec![b"h2".to_vec(), b"h2".to_vec()];
+        let (record, _) = capture_mirror_record(
+            &mirror_builder(),
+            &["h2", "http/1.1"],
+            Some("fixture.test"),
+            Some(&browser),
+        );
+
+        assert_eq!(browser_hello(&record).alps_protocols, [b"h2".to_vec()]);
+    }
+
     #[test]
     #[cfg(boringssl)]
     fn mirror_reports_grease_mismatch() {

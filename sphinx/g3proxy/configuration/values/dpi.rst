@@ -663,8 +663,9 @@ The keys are:
   - trust_anchors
   - status_request and signed_certificate_timestamp
 
-  Extension order, GREASE values, key shares, PSK and session id are not copied. GREASE itself
-  follows ``enable_grease`` and extension permutation follows ``permute_extensions``.
+  Extension order, GREASE values, the key material of key_share (new keys are made for the same
+  groups), PSK and session id are not copied. GREASE itself follows ``enable_grease`` and
+  extension permutation follows ``permute_extensions``.
   A cached upstream session is resumed only if the client resumes a session of its own (sends
   pre_shared_key), so a client with a fresh profile also makes a full handshake upstream.
 
