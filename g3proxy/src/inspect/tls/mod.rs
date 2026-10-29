@@ -81,7 +81,8 @@ impl ParsedClientHello {
         let browser = if mirror {
             BrowserClientHello::parse(ch.cipher_suites, ch.extensions)
                 .inspect_err(|e| {
-                    warn!("can't mirror ClientHello, using the static one: {e}");
+                    let sni = sni.as_ref().map(|n| n.as_ref()).unwrap_or("-");
+                    warn!("can't mirror ClientHello for SNI {sni}, using the static one: {e}");
                 })
                 .ok()
         } else {

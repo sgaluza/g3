@@ -45,6 +45,8 @@ const SUPPORTED_EXTENSIONS: [u16; 22] = [
     0x0031, // post_handshake_auth
 ];
 
+const TLS1_3_VERSION: u16 = 0x0304;
+
 /// TLS_EMPTY_RENEGOTIATION_INFO_SCSV and TLS_FALLBACK_SCSV, added by the library itself
 const SIGNALING_CIPHER_SUITES: [u16; 2] = [0x00ff, 0x5600];
 
@@ -194,13 +196,19 @@ fn set_cipher_suites(
 ) -> anyhow::Result<()> {
     let mut names = Vec::new();
     for &id in suites {
-        if id >> 8 == 0x13 || SIGNALING_CIPHER_SUITES.contains(&id) {
+        if SIGNALING_CIPHER_SUITES.contains(&id) {
             continue;
         }
         // SAFETY: a lookup in the static cipher table, no pointer arguments
         let cipher = unsafe { openssl_sys::SSL_get_cipher_by_value(id) };
         if cipher.is_null() {
             report.dropped_cipher_suites.push(id);
+            continue;
+        }
+        // SAFETY: cipher points to the static table
+        let min_version = unsafe { openssl_sys::SSL_CIPHER_get_min_version(cipher) };
+        // the cipher list doesn't take TLS 1.3 suites, BoringSSL always sends its own
+        if min_version >= TLS1_3_VERSION {
             continue;
         }
         // SAFETY: cipher points to the static table, its name is a static C string
@@ -233,8 +241,11 @@ fn set_groups(
     let ssl_ptr = ssl.as_ptr();
     let mut known = Vec::with_capacity(groups.len());
     for &g in groups {
+        // a repeated value can't be sent twice, so it's dropped as well
         // SAFETY: valid SSL, a one element array; an unknown group is rejected
-        if !known.contains(&g) && unsafe { openssl_sys::SSL_set1_group_ids(ssl_ptr, &g, 1) } == 1 {
+        let ok =
+            !known.contains(&g) && unsafe { openssl_sys::SSL_set1_group_ids(ssl_ptr, &g, 1) } == 1;
+        if ok {
             known.push(g);
         } else {
             report.dropped_groups.push(g);
@@ -293,9 +304,11 @@ fn set_signature_algorithms(
     let ssl_ptr = ssl.as_ptr();
     let mut known = Vec::with_capacity(sigalgs.len());
     for &s in sigalgs {
+        // a repeated value can't be sent twice, so it's dropped as well
         // SAFETY: valid SSL, a one element array; an unknown algorithm is rejected
-        let ok = unsafe { openssl_sys::SSL_set_verify_algorithm_prefs(ssl_ptr, &s, 1) } == 1;
-        if ok && !known.contains(&s) {
+        let ok = !known.contains(&s)
+            && unsafe { openssl_sys::SSL_set_verify_algorithm_prefs(ssl_ptr, &s, 1) } == 1;
+        if ok {
             known.push(s);
         } else {
             report.dropped_signature_algorithms.push(s);

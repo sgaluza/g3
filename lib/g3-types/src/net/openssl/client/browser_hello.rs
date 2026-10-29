@@ -13,7 +13,7 @@ const EXT_STATUS_REQUEST: u16 = 0x0005;
 const EXT_SUPPORTED_GROUPS: u16 = 0x000a;
 const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000d;
 const EXT_SIGNED_CERT_TIMESTAMP: u16 = 0x0012;
-const EXT_PRE_SHARED_KEY: u16 = 0x0029;
+pub(super) const EXT_PRE_SHARED_KEY: u16 = 0x0029;
 const EXT_KEY_SHARE: u16 = 0x0033;
 const EXT_ALPS_OLD: u16 = 0x4469;
 const EXT_ALPS_NEW: u16 = 0x44cd;
@@ -21,7 +21,7 @@ const EXT_TRUST_ANCHORS: u16 = 0xca34;
 const EXT_ECH: u16 = 0xfe0d;
 
 /// RFC 8701 GREASE value: 0x?A?A with equal bytes
-fn is_grease(v: u16) -> bool {
+pub(super) fn is_grease(v: u16) -> bool {
     v & 0x0f0f == 0x0a0a && (v >> 8) == (v & 0xff)
 }
 
@@ -186,6 +186,8 @@ pub struct MirrorReport {
     pub fallback: Vec<&'static str>,
     /// GREASE use of the browser differs from the enable_grease config
     pub grease_mismatch: bool,
+    /// Copying failed and the static ClientHello was sent instead
+    pub mirror_error: Option<String>,
 }
 
 impl MirrorReport {
@@ -218,6 +220,9 @@ impl fmt::Display for MirrorReport {
         }
         if self.grease_mismatch {
             parts.push("GREASE use differs from enable_grease".to_string());
+        }
+        if let Some(e) = &self.mirror_error {
+            parts.push(format!("mirror failed, static ClientHello sent: {e}"));
         }
         f.write_str(&parts.join("; "))
     }

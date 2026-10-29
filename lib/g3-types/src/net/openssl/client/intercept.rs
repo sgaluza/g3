@@ -136,6 +136,25 @@ impl ContextPair {
     }
 }
 
+/// Keep the mirrored Ssl, or if copying the browser ClientHello failed, use a
+/// fresh static one (the failed Ssl may be half configured) and report why
+#[cfg(boringssl)]
+fn mirror_or_static(
+    mirror: anyhow::Result<(Ssl, MirrorReport)>,
+    static_ssl: impl FnOnce() -> anyhow::Result<Ssl>,
+) -> anyhow::Result<(Ssl, MirrorReport)> {
+    match mirror {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let report = MirrorReport {
+                mirror_error: Some(e.to_string()),
+                ..Default::default()
+            };
+            Ok((static_ssl()?, report))
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct OpensslInterceptionClientConfig {
     ssl_context_pair: ContextPair,
@@ -179,10 +198,11 @@ impl OpensslInterceptionClientConfig {
         browser: Option<&BrowserClientHello>,
     ) -> anyhow::Result<(Ssl, MirrorReport)> {
         match browser {
-            Some(b) if self.mirror_client_hello() => {
+            Some(b) if self.mirror_client_hello() => mirror_or_static(
                 self.ssl_context_pair
-                    .build_mirror_ssl(server_name, upstream, alpn_ext, b)
-            }
+                    .build_mirror_ssl(server_name, upstream, alpn_ext, b),
+                || self.build_ssl(server_name, upstream, alpn_ext),
+            ),
             _ => {
                 let ssl = self.build_ssl(server_name, upstream, alpn_ext)?;
                 Ok((ssl, MirrorReport::default()))
@@ -770,6 +790,9 @@ mod tests {
     use std::io::{self, Read, Write};
 
     use super::*;
+    #[cfg(boringssl)]
+    use crate::net::openssl::client::browser_hello::EXT_PRE_SHARED_KEY;
+    use crate::net::openssl::client::browser_hello::is_grease;
 
     /// TLS 1.2 cipher list sent by Chrome; the library prepends its own TLS 1.3 suites
     const CHROME_CIPHER_LIST: &str = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
@@ -947,10 +970,6 @@ mod tests {
                 hash(format!("{}_{}", join(exts, true), join(sigalgs, false))),
             )
         }
-    }
-
-    fn is_grease(v: u16) -> bool {
-        v & 0x0f0f == 0x0a0a && (v >> 8) == (v & 0xff)
     }
 
     fn read_u16(buf: &[u8], offset: usize) -> u16 {
@@ -1548,9 +1567,6 @@ mod tests {
         assert_eq!(parse_client_hello(&record).ja4(), CHROME_156_JA4);
     }
 
-    #[cfg(boringssl)]
-    const EXT_PRE_SHARED_KEY: u16 = 0x0029;
-
     /// Self-signed P-256 certificate and key for a local test server
     #[cfg(boringssl)]
     fn test_server_cert() -> (X509, openssl::pkey::PKey<openssl::pkey::Private>) {
@@ -1656,6 +1672,64 @@ mod tests {
             capture_record_with_config(&config, &["h2"], Some("www.example.com"), None);
         let hello = parse_client_hello(&record);
         assert!(hello.extensions.contains(&EXT_PRE_SHARED_KEY));
+    }
+
+    /// An error while copying the browser ClientHello must not fail the connection
+    #[test]
+    #[cfg(boringssl)]
+    fn mirror_error_falls_back_to_static_hello() {
+        let config = chrome_156_builder().build().unwrap();
+        let (ssl, report) = mirror_or_static(Err(anyhow!("copy failed")), || {
+            config.build_ssl(None, &test_upstream(), None)
+        })
+        .unwrap();
+
+        assert_eq!(report.mirror_error.as_deref(), Some("copy failed"));
+        assert!(report.to_string().contains("copy failed"), "{report}");
+        drop(ssl);
+
+        // a mirror build that worked is kept as is
+        let mirrored = config.build_ssl(None, &test_upstream(), None).unwrap();
+        let (_, report) = mirror_or_static(Ok((mirrored, MirrorReport::default())), || {
+            panic!("static build must not run")
+        })
+        .unwrap();
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn mirror_reports_unknown_tls13_range_cipher() {
+        let mut browser = browser_hello(CHROME_156_CLIENT_HELLO);
+        // 0x13ff looks like a TLS 1.3 suite but isn't one
+        browser.cipher_suites.push(0x13ff);
+        let (record, report) = capture_mirror_record(
+            &mirror_builder(),
+            &["h2", "http/1.1"],
+            Some("fixture.test"),
+            Some(&browser),
+        );
+
+        assert_eq!(report.dropped_cipher_suites, [0x13ff]);
+        assert_eq!(parse_client_hello(&record).ja4(), CHROME_156_JA4);
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn mirror_reports_duplicates_once() {
+        let mut browser = browser_hello(CHROME_156_CLIENT_HELLO);
+        browser.groups.push(0x001d);
+        browser.signature_algorithms.push(0x0403);
+        let (record, report) = capture_mirror_record(
+            &mirror_builder(),
+            &["h2", "http/1.1"],
+            Some("fixture.test"),
+            Some(&browser),
+        );
+
+        assert_eq!(report.dropped_groups, [0x001d]);
+        assert_eq!(report.dropped_signature_algorithms, [0x0403]);
+        assert_eq!(parse_client_hello(&record).ja4(), CHROME_156_JA4);
     }
 
     #[test]
