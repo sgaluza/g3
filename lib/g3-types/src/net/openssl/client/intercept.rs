@@ -375,39 +375,47 @@ impl OpensslInterceptionClientConfigBuilder {
         Ok(())
     }
 
-    /// Signature algorithms with GREASE and the trust_anchors extension, BoringSSL only
+    /// Signature algorithms sent in ClientHello, BoringSSL only
+    /// (the variant-ssl wrapper is gated by cfg(ossl110), not set for BoringSSL)
     #[cfg(boringssl)]
-    fn build_set_browser_hello(&self, ctx_builder: &mut SslContextBuilder) -> anyhow::Result<()> {
-        if !self.signature_algorithms.is_empty() {
-            let sigalgs = std::ffi::CString::new(self.signature_algorithms.as_str())
-                .map_err(|_| anyhow!("signature algorithms contain a NUL byte"))?;
-            // SAFETY: the pointer is a valid SSL_CTX owned by ctx_builder, sigalgs is a C string
-            let r = unsafe {
-                openssl_sys::SSL_CTX_set1_sigalgs_list(ctx_builder.as_ptr(), sigalgs.as_ptr())
-            };
-            if r != 1 {
-                return Err(anyhow!(
-                    "failed to set signature algorithms {}",
-                    self.signature_algorithms
-                ));
-            }
+    fn build_set_signature_algorithms(
+        &self,
+        ctx_builder: &mut SslContextBuilder,
+    ) -> anyhow::Result<()> {
+        if self.signature_algorithms.is_empty() {
+            return Ok(());
         }
-        if self.enable_grease {
-            // SAFETY: the pointer is a valid SSL_CTX owned by ctx_builder
-            unsafe { openssl_sys::SSL_CTX_set_grease_sigalgs_enabled(ctx_builder.as_ptr(), 1) };
+        let sigalgs = std::ffi::CString::new(self.signature_algorithms.as_str())
+            .map_err(|_| anyhow!("signature algorithms contain a NUL byte"))?;
+        // SAFETY: the pointer is a valid SSL_CTX owned by ctx_builder, sigalgs is a C string
+        let r = unsafe {
+            openssl_sys::SSL_CTX_set1_sigalgs_list(ctx_builder.as_ptr(), sigalgs.as_ptr())
+        };
+        if r != 1 {
+            return Err(anyhow!(
+                "failed to set signature algorithms {}",
+                self.signature_algorithms
+            ));
         }
-        if let Some(ids) = &self.trust_anchor_ids {
-            // SAFETY: the pointer is a valid SSL_CTX, BoringSSL copies the buffer
-            let r = unsafe {
-                openssl_sys::SSL_CTX_set1_requested_trust_anchors(
-                    ctx_builder.as_ptr(),
-                    ids.as_ptr(),
-                    ids.len(),
-                )
-            };
-            if r != 1 {
-                return Err(anyhow!("invalid trust anchor IDs"));
-            }
+        Ok(())
+    }
+
+    /// The trust_anchors extension, BoringSSL only
+    #[cfg(boringssl)]
+    fn build_set_trust_anchors(&self, ctx_builder: &mut SslContextBuilder) -> anyhow::Result<()> {
+        let Some(ids) = &self.trust_anchor_ids else {
+            return Ok(());
+        };
+        // SAFETY: the pointer is a valid SSL_CTX, BoringSSL copies the buffer
+        let r = unsafe {
+            openssl_sys::SSL_CTX_set1_requested_trust_anchors(
+                ctx_builder.as_ptr(),
+                ids.as_ptr(),
+                ids.len(),
+            )
+        };
+        if r != 1 {
+            return Err(anyhow!("invalid trust anchor IDs"));
         }
         Ok(())
     }
@@ -485,6 +493,12 @@ impl OpensslInterceptionClientConfigBuilder {
 
         if self.enable_grease {
             ctx_builder.set_grease_enabled(true);
+            // BoringSSL keeps GREASE in signature_algorithms behind its own flag for now
+            #[cfg(boringssl)]
+            // SAFETY: the pointer is a valid SSL_CTX owned by ctx_builder
+            unsafe {
+                openssl_sys::SSL_CTX_set_grease_sigalgs_enabled(ctx_builder.as_ptr(), 1)
+            };
         }
         if self.permute_extensions {
             ctx_builder.set_permute_extensions(true);
@@ -493,7 +507,9 @@ impl OpensslInterceptionClientConfigBuilder {
         self.build_set_cipher_list(&mut ctx_builder)?;
 
         #[cfg(boringssl)]
-        self.build_set_browser_hello(&mut ctx_builder)?;
+        self.build_set_signature_algorithms(&mut ctx_builder)?;
+        #[cfg(boringssl)]
+        self.build_set_trust_anchors(&mut ctx_builder)?;
 
         self.build_set_cert_compression(&mut ctx_builder)?;
 
@@ -1002,6 +1018,20 @@ mod tests {
         assert_eq!(
             hello.extension(EXT_TRUST_ANCHORS),
             Some(expected.as_slice())
+        );
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn empty_trust_anchor_ids_still_send_extension() {
+        let mut builder = OpensslInterceptionClientConfigBuilder::default();
+        builder.set_trust_anchor_ids(Vec::new());
+        let hello = capture_client_hello(&builder, &["h2", "http/1.1"]);
+
+        // only the zero 16-bit length of the ID list
+        assert_eq!(
+            hello.extension(EXT_TRUST_ANCHORS),
+            Some([0u8, 0].as_slice())
         );
     }
 

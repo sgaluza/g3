@@ -392,18 +392,20 @@ pub fn as_to_many_openssl_tls_client_config_builder(
 
 /// Decode a hex string (any case, even number of digits) into bytes
 fn decode_hex(s: &str) -> anyhow::Result<Vec<u8>> {
+    let digits = s
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            c.to_digit(16)
+                .map(|d| d as u8)
+                .ok_or_else(|| anyhow!("invalid hex digit {c:?} at offset {i}"))
+        })
+        .collect::<anyhow::Result<Vec<u8>>>()?;
     // bit test instead of is_multiple_of, which needs Rust 1.87 (g3proxy MSRV is 1.86)
-    if s.len() & 1 != 0 {
+    if digits.len() & 1 != 0 {
         return Err(anyhow!("odd number of hex digits"));
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| {
-            s.get(i..i + 2)
-                .and_then(|b| u8::from_str_radix(b, 16).ok())
-                .ok_or_else(|| anyhow!("invalid hex digit at offset {i}"))
-        })
-        .collect()
+    Ok(digits.chunks(2).map(|p| (p[0] << 4) | p[1]).collect())
 }
 
 pub fn as_tls_interception_client_config_builder(
@@ -1350,6 +1352,20 @@ mod tests {
         expected.set_no_session_cache();
         expected.set_session_cache_each_capacity(10);
         assert_eq!(builder, expected);
+    }
+
+    #[test]
+    fn decode_hex_reports_exact_offset() {
+        assert_eq!(decode_hex("0Ab1").unwrap(), [0x0a, 0xb1]);
+        assert!(decode_hex("").unwrap().is_empty());
+
+        // the second digit of the second byte is wrong
+        let e = decode_hex("05zg").unwrap_err().to_string();
+        assert!(e.contains("offset 2"), "{e}");
+        let e = decode_hex("058g").unwrap_err().to_string();
+        assert!(e.contains("offset 3"), "{e}");
+
+        assert!(decode_hex("0582df1").is_err());
     }
 
     #[test]
