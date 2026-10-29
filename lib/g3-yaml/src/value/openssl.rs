@@ -1359,9 +1359,10 @@ mod tests {
         assert_eq!(decode_hex("0Ab1").unwrap(), [0x0a, 0xb1]);
         assert!(decode_hex("").unwrap().is_empty());
 
-        // the second digit of the second byte is wrong
+        // the first digit of the second byte is wrong
         let e = decode_hex("05zg").unwrap_err().to_string();
         assert!(e.contains("offset 2"), "{e}");
+        // the second digit of the second byte is wrong
         let e = decode_hex("058g").unwrap_err().to_string();
         assert!(e.contains("offset 3"), "{e}");
 

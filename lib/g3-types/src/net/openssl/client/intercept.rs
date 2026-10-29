@@ -493,9 +493,9 @@ impl OpensslInterceptionClientConfigBuilder {
 
         if self.enable_grease {
             ctx_builder.set_grease_enabled(true);
-            // BoringSSL keeps GREASE in signature_algorithms behind its own flag for now
-            #[cfg(boringssl)]
+            // BoringSSL keeps GREASE in signature_algorithms behind its own flag for now.
             // SAFETY: the pointer is a valid SSL_CTX owned by ctx_builder
+            #[cfg(boringssl)]
             unsafe {
                 openssl_sys::SSL_CTX_set_grease_sigalgs_enabled(ctx_builder.as_ptr(), 1)
             };
