@@ -23,6 +23,12 @@ use super::{OpensslCertificatePair, OpensslProtocol, OpensslTlcpCertificatePair}
 use crate::net::tls::AlpnProtocol;
 use crate::net::{Host, TlsAlpn, TlsServerName, TlsVersion, UpstreamAddr};
 
+mod browser_hello;
+pub use browser_hello::{BrowserClientHello, MirrorReport};
+
+#[cfg(boringssl)]
+mod mirror;
+
 mod intercept;
 pub use intercept::{OpensslInterceptionClientConfig, OpensslInterceptionClientConfigBuilder};
 

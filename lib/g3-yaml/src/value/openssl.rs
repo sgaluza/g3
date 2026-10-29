@@ -521,6 +521,11 @@ pub fn as_tls_interception_client_config_builder(
                 builder.set_trust_anchor_ids(ids);
                 Ok(())
             }
+            "mirror_client_hello" => {
+                let enable = crate::value::as_bool(v)?;
+                builder.set_mirror_client_hello(enable);
+                Ok(())
+            }
             "insecure" => {
                 let enable = crate::value::as_bool(v)?;
                 builder.set_insecure(enable);
@@ -1351,6 +1356,15 @@ mod tests {
         expected.set_handshake_timeout(Duration::from_secs(10));
         expected.set_no_session_cache();
         expected.set_session_cache_each_capacity(10);
+        assert_eq!(builder, expected);
+    }
+
+    #[test]
+    fn as_tls_interception_client_config_builder_mirror() {
+        let yaml = YamlLoader::load_from_str("mirror_client_hello: true").unwrap();
+        let builder = as_tls_interception_client_config_builder(&yaml[0], None).unwrap();
+        let mut expected = OpensslInterceptionClientConfigBuilder::default();
+        expected.set_mirror_client_hello(true);
         assert_eq!(builder, expected);
     }
 

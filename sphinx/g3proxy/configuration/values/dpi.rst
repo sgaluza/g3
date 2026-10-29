@@ -647,6 +647,41 @@ The keys are:
 
   **default**: not set, the extension is not sent
 
+* mirror_client_hello
+
+  **optional**, **type**: bool
+
+  Build the upstream ClientHello from the one of the client on every connection, so that the TLS
+  fingerprint of the upstream connection follows the client (browser) version instead of fixed
+  values. These are copied:
+
+  - TLS 1.2 cipher suites, in client order (TLS 1.3 cipher suites are fixed in BoringSSL)
+  - supported_groups and the groups of key_share
+  - signature_algorithms
+  - ALPS protocols and codepoint, with Chrome's HTTP/2 SETTINGS for h2
+  - GREASE ECH if the client sends encrypted_client_hello (real ECH can't be copied)
+  - trust_anchors
+  - status_request and signed_certificate_timestamp
+
+  Extension order, GREASE values, key shares, PSK and session id are not copied. GREASE itself
+  follows ``enable_grease`` and extension permutation follows ``permute_extensions``.
+  A cached upstream session is resumed only if the client resumes a session of its own (sends
+  pre_shared_key), so a client with a fresh profile also makes a full handshake upstream.
+
+  Values BoringSSL doesn't know are dropped. If nothing is left of cipher suites, groups or
+  signature algorithms, the static ``cipher_list``, ``supported_groups`` or
+  ``signature_algorithms`` is used. Dropped values, client extensions the upstream ClientHello
+  can't carry, a fallback to a static value and a GREASE use different from ``enable_grease``
+  are logged as a warning for the connection.
+
+  ``use_ocsp_stapling``, ``enable_sct``, ``enable_ech_grease``, ``enable_alps`` and
+  ``trust_anchor_ids`` only apply if the client ClientHello can't be parsed for mirroring.
+  User-site TLS client configs, TLCP and STARTTLS keep the static ClientHello.
+
+  Only supported for BoringSSL.
+
+  **default**: false
+
 * insecure:
 
   **optional**, **type**: bool

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use log::warn;
 use openssl::ssl::Ssl;
 
 use g3_dpi::{Protocol, ProtocolInspector};
@@ -70,15 +71,29 @@ where
                         "failed to build user-site ssl context: {e}"
                     ))
                 })?,
-            None => self
-                .tls_interception
-                .client_config
-                .build_ssl(sni_hostname, &self.upstream, alpn_ext.as_ref())
-                .map_err(|e| {
-                    TlsInterceptionError::UpstreamPrepareFailed(anyhow!(
-                        "failed to build general ssl context: {e}"
-                    ))
-                })?,
+            None => {
+                let (ssl, report) = self
+                    .tls_interception
+                    .client_config
+                    .build_mirror_ssl(
+                        sni_hostname,
+                        &self.upstream,
+                        alpn_ext.as_ref(),
+                        client_hello.browser.as_ref(),
+                    )
+                    .map_err(|e| {
+                        TlsInterceptionError::UpstreamPrepareFailed(anyhow!(
+                            "failed to build general ssl context: {e}"
+                        ))
+                    })?;
+                if !report.is_empty() {
+                    warn!(
+                        "ClientHello to {} differs from the browser one: {report}",
+                        self.upstream
+                    );
+                }
+                ssl
+            }
         };
 
         // fetch fake server cert early in the background

@@ -5,8 +5,8 @@
 
 mod client;
 pub use client::{
-    OpensslClientConfig, OpensslClientConfigBuilder, OpensslInterceptionClientConfig,
-    OpensslInterceptionClientConfigBuilder,
+    BrowserClientHello, MirrorReport, OpensslClientConfig, OpensslClientConfigBuilder,
+    OpensslInterceptionClientConfig, OpensslInterceptionClientConfigBuilder,
 };
 
 mod server;
