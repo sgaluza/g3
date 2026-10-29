@@ -221,7 +221,7 @@ impl OpensslInterceptionClientConfigBuilder {
         }
 
         #[cfg(boringssl)]
-        self.check_browser_hello()?;
+        self.check_signature_algorithms_and_trust_anchors()?;
 
         Ok(())
     }
@@ -229,17 +229,13 @@ impl OpensslInterceptionClientConfigBuilder {
     /// Validate values that BoringSSL only checks when the SSL context is built
     /// (or never checks), so that a broken config fails on parse and `g3proxy -t`
     #[cfg(boringssl)]
-    fn check_browser_hello(&self) -> anyhow::Result<()> {
+    fn check_signature_algorithms_and_trust_anchors(&self) -> anyhow::Result<()> {
         if !self.signature_algorithms.is_empty() {
             let mut ctx_builder = SslContextBuilder::new(SslMethod::tls_client())
                 .map_err(|e| anyhow!("failed to create ssl context builder: {e}"))?;
+            // keep the cause: an unknown name and a NUL byte are reported differently
             self.build_set_signature_algorithms(&mut ctx_builder)
-                .map_err(|_| {
-                    anyhow!(
-                        "invalid signature_algorithms {}: unknown or unsupported name",
-                        self.signature_algorithms
-                    )
-                })?;
+                .map_err(|e| anyhow!("invalid signature_algorithms: {e}"))?;
         }
         if let Some(ids) = &self.trust_anchor_ids {
             validate_trust_anchor_ids(ids)?;
