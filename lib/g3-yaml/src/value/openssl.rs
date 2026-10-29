@@ -390,6 +390,24 @@ pub fn as_to_many_openssl_tls_client_config_builder(
     set_openssl_tls_client_config_builder(builder, value, lookup_dir)
 }
 
+/// Decode a hex string (any case, even number of digits) into bytes
+fn decode_hex(s: &str) -> anyhow::Result<Vec<u8>> {
+    let digits = s
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            c.to_digit(16)
+                .map(|d| d as u8)
+                .ok_or_else(|| anyhow!("invalid hex digit {c:?} at offset {i}"))
+        })
+        .collect::<anyhow::Result<Vec<u8>>>()?;
+    // bit test instead of is_multiple_of, which needs Rust 1.87 (g3proxy MSRV is 1.86)
+    if digits.len() & 1 != 0 {
+        return Err(anyhow!("odd number of hex digits"));
+    }
+    Ok(digits.chunks(2).map(|p| (p[0] << 4) | p[1]).collect())
+}
+
 pub fn as_tls_interception_client_config_builder(
     value: &Yaml,
     lookup_dir: Option<&Path>,
@@ -490,6 +508,17 @@ pub fn as_tls_interception_client_config_builder(
             "enable_alps" => {
                 let enable = crate::value::as_bool(v)?;
                 builder.set_enable_alps(enable);
+                Ok(())
+            }
+            "signature_algorithms" => {
+                let sigalgs = crate::value::as_string(v)?;
+                builder.set_signature_algorithms(sigalgs);
+                Ok(())
+            }
+            "trust_anchor_ids" => {
+                let s = crate::value::as_string(v)?;
+                let ids = decode_hex(&s).context(format!("invalid hex string for key {k}"))?;
+                builder.set_trust_anchor_ids(ids);
                 Ok(())
             }
             "insecure" => {
@@ -1262,6 +1291,8 @@ mod tests {
                 cipher_list: "ECDHE-RSA-AES128-GCM-SHA256:AES128-SHA"
                 enable_ech_grease: true
                 enable_alps: true
+                signature_algorithms: "mldsa44:ecdsa_secp256r1_sha256"
+                trust_anchor_ids: "0582DF13020104d6790901"
                 insecure: false
             "#,
             cert_path.display()
@@ -1287,6 +1318,10 @@ mod tests {
         expected.set_cipher_list("ECDHE-RSA-AES128-GCM-SHA256:AES128-SHA".to_string());
         expected.set_enable_ech_grease(true);
         expected.set_enable_alps(true);
+        expected.set_signature_algorithms("mldsa44:ecdsa_secp256r1_sha256".to_string());
+        expected.set_trust_anchor_ids(vec![
+            0x05, 0x82, 0xdf, 0x13, 0x02, 0x01, 0x04, 0xd6, 0x79, 0x09, 0x01,
+        ]);
         expected.set_insecure(false);
         assert_eq!(builder, expected);
 
@@ -1320,7 +1355,30 @@ mod tests {
     }
 
     #[test]
+    fn decode_hex_reports_exact_offset() {
+        assert_eq!(decode_hex("0Ab1").unwrap(), [0x0a, 0xb1]);
+        assert!(decode_hex("").unwrap().is_empty());
+
+        // the first digit of the second byte is wrong
+        let e = decode_hex("05zg").unwrap_err().to_string();
+        assert!(e.contains("offset 2"), "{e}");
+        // the second digit of the second byte is wrong
+        let e = decode_hex("058g").unwrap_err().to_string();
+        assert!(e.contains("offset 3"), "{e}");
+
+        assert!(decode_hex("0582df1").is_err());
+    }
+
+    #[test]
     fn as_tls_interception_client_config_builder_err() {
+        // trust_anchor_ids must be hex with an even number of digits
+        for bad in ["0582df1", "zz"] {
+            let yaml = YamlLoader::load_from_str(&format!("trust_anchor_ids: \"{bad}\""))
+                .unwrap()
+                .remove(0);
+            assert!(as_tls_interception_client_config_builder(&yaml, None).is_err());
+        }
+
         // invalid YAML type
         let yaml = yaml_str!("invalid");
         assert!(as_tls_interception_client_config_builder(&yaml, None).is_err());

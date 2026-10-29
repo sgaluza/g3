@@ -150,9 +150,13 @@ pub struct OpensslInterceptionClientConfigBuilder {
     permute_extensions: bool,
     cipher_list: String,
     #[cfg(boringssl)]
+    signature_algorithms: String,
+    #[cfg(boringssl)]
     enable_ech_grease: bool,
     #[cfg(boringssl)]
     enable_alps: bool,
+    #[cfg(boringssl)]
+    trust_anchor_ids: Option<Vec<u8>>,
     insecure: bool,
 }
 
@@ -175,9 +179,13 @@ impl Default for OpensslInterceptionClientConfigBuilder {
             permute_extensions: false,
             cipher_list: String::default(),
             #[cfg(boringssl)]
+            signature_algorithms: String::default(),
+            #[cfg(boringssl)]
             enable_ech_grease: false,
             #[cfg(boringssl)]
             enable_alps: false,
+            #[cfg(boringssl)]
+            trust_anchor_ids: None,
             insecure: false,
         }
     }
@@ -305,6 +313,30 @@ impl OpensslInterceptionClientConfigBuilder {
         warn!("ALPS can only be set for BoringSSL");
     }
 
+    /// Signature algorithms sent in ClientHello, colon separated TLS 1.3 names
+    /// (`rsa_pss_rsae_sha256`, `mldsa44`, ...)
+    #[cfg(boringssl)]
+    pub fn set_signature_algorithms(&mut self, sigalgs: String) {
+        self.signature_algorithms = sigalgs;
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn set_signature_algorithms(&mut self, _sigalgs: String) {
+        warn!("signature algorithms can only be set for BoringSSL");
+    }
+
+    /// Send the trust_anchors extension with these trust anchor IDs, in wire format
+    /// (each ID prefixed by an 8-bit length); an empty list still sends the extension
+    #[cfg(boringssl)]
+    pub fn set_trust_anchor_ids(&mut self, ids: Vec<u8>) {
+        self.trust_anchor_ids = Some(ids);
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn set_trust_anchor_ids(&mut self, _ids: Vec<u8>) {
+        warn!("trust anchor IDs can only be set for BoringSSL");
+    }
+
     pub fn set_insecure(&mut self, enable: bool) {
         self.insecure = enable;
     }
@@ -339,6 +371,51 @@ impl OpensslInterceptionClientConfigBuilder {
             ctx_builder
                 .set_cipher_list(&self.cipher_list)
                 .map_err(|e| anyhow!("failed to set cipher list: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Signature algorithms sent in ClientHello, BoringSSL only
+    /// (the variant-ssl wrapper is gated by cfg(ossl110), not set for BoringSSL)
+    #[cfg(boringssl)]
+    fn build_set_signature_algorithms(
+        &self,
+        ctx_builder: &mut SslContextBuilder,
+    ) -> anyhow::Result<()> {
+        if self.signature_algorithms.is_empty() {
+            return Ok(());
+        }
+        let sigalgs = std::ffi::CString::new(self.signature_algorithms.as_str())
+            .map_err(|_| anyhow!("signature algorithms contain a NUL byte"))?;
+        // SAFETY: the pointer is a valid SSL_CTX owned by ctx_builder, sigalgs is a C string
+        let r = unsafe {
+            openssl_sys::SSL_CTX_set1_sigalgs_list(ctx_builder.as_ptr(), sigalgs.as_ptr())
+        };
+        if r != 1 {
+            return Err(anyhow!(
+                "failed to set signature algorithms {}",
+                self.signature_algorithms
+            ));
+        }
+        Ok(())
+    }
+
+    /// The trust_anchors extension, BoringSSL only
+    #[cfg(boringssl)]
+    fn build_set_trust_anchors(&self, ctx_builder: &mut SslContextBuilder) -> anyhow::Result<()> {
+        let Some(ids) = &self.trust_anchor_ids else {
+            return Ok(());
+        };
+        // SAFETY: the pointer is a valid SSL_CTX, BoringSSL copies the buffer
+        let r = unsafe {
+            openssl_sys::SSL_CTX_set1_requested_trust_anchors(
+                ctx_builder.as_ptr(),
+                ids.as_ptr(),
+                ids.len(),
+            )
+        };
+        if r != 1 {
+            return Err(anyhow!("invalid trust anchor IDs"));
         }
         Ok(())
     }
@@ -416,12 +493,23 @@ impl OpensslInterceptionClientConfigBuilder {
 
         if self.enable_grease {
             ctx_builder.set_grease_enabled(true);
+            // BoringSSL keeps GREASE in signature_algorithms behind its own flag for now.
+            // SAFETY: the pointer is a valid SSL_CTX owned by ctx_builder
+            #[cfg(boringssl)]
+            unsafe {
+                openssl_sys::SSL_CTX_set_grease_sigalgs_enabled(ctx_builder.as_ptr(), 1)
+            };
         }
         if self.permute_extensions {
             ctx_builder.set_permute_extensions(true);
         }
 
         self.build_set_cipher_list(&mut ctx_builder)?;
+
+        #[cfg(boringssl)]
+        self.build_set_signature_algorithms(&mut ctx_builder)?;
+        #[cfg(boringssl)]
+        self.build_set_trust_anchors(&mut ctx_builder)?;
 
         self.build_set_cert_compression(&mut ctx_builder)?;
 
@@ -591,6 +679,48 @@ mod tests {
 
     const EXT_ALPS_NEW_CODEPOINT: u16 = 17613;
     const EXT_ECH: u16 = 0xfe0d;
+    const EXT_SERVER_NAME: u16 = 0x0000;
+    const EXT_ALPN: u16 = 0x0010;
+    const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000d;
+    const EXT_SUPPORTED_VERSIONS: u16 = 0x002b;
+    const EXT_TRUST_ANCHORS: u16 = 0xca34;
+
+    // Reference: stock Chrome 156.0.8078.47 from the sandbrowser web-agent image,
+    // captured directly (no proxy) on tls.peet.ws. Re-capture on a Chrome update.
+
+    /// signature_algorithms of Chrome 156: ML-DSA-44/65/87 first, no SHA-1
+    #[cfg(boringssl)]
+    const CHROME_156_SIGNATURE_ALGORITHMS: &str = "mldsa44:mldsa65:mldsa87:\
+        ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
+        ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:\
+        rsa_pss_rsae_sha512:rsa_pkcs1_sha512";
+
+    const CHROME_156_SIGALG_CODES: [u16; 11] = [
+        0x0904, 0x0905, 0x0906, 0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
+    ];
+
+    /// trust_anchors extension body of Chrome 156 without the outer u16 length:
+    /// trust anchor IDs, each prefixed by an 8-bit length
+    #[cfg(boringssl)]
+    const CHROME_156_TRUST_ANCHOR_IDS: &str = "0582df1302010582df1302060582df13020d0582df13020e\
+        0582df13020f0582df1302120582df1302130582df13021408839a648c9b2d010708839a648c9b2d0108\
+        08839a648c9b2d010908839a648c9b2d010a08839a648c9b2d010b08839a648c9b2d010c08839a648c9b\
+        2d010d08839a648c9b2d011208839a648c9b2d011304d679090104d679090404d679090504d679090604\
+        d679090704d679090804d679090a04d679090b04d679090c04d679090d04d679090f";
+
+    const CHROME_156_JA4: &str = "t13d1517h2_8daaf6152771_cb7bf5808d99";
+
+    /// Groups as configured in production, also those of Chrome 156
+    #[cfg(boringssl)]
+    const CHROME_SUPPORTED_GROUPS: &str = "X25519MLKEM768:X25519:P-256:P-384";
+
+    #[cfg(boringssl)]
+    fn hex_decode(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
 
     /// Stream that records everything written and never yields data,
     /// so the handshake stops right after the ClientHello is sent
@@ -618,6 +748,99 @@ mod tests {
     struct ClientHello {
         cipher_suites: Vec<u16>,
         extensions: Vec<u16>,
+        /// Body of every non-GREASE extension, in wire order
+        extension_data: Vec<(u16, Vec<u8>)>,
+    }
+
+    impl ClientHello {
+        fn extension(&self, ext_type: u16) -> Option<&[u8]> {
+            self.extension_data
+                .iter()
+                .find(|(t, _)| *t == ext_type)
+                .map(|(_, d)| d.as_slice())
+        }
+
+        /// u16 values of a list extension body with the given length prefix size
+        fn u16_list(&self, ext_type: u16, len_prefix: usize) -> Vec<u16> {
+            let data = self.extension(ext_type).unwrap_or_default();
+            let values = data.get(len_prefix..).unwrap_or_default();
+            // a truncated value means broken test data, fail loudly instead of dropping it
+            assert!(
+                values.len() & 1 == 0,
+                "extension {ext_type:04x}: odd length {} of u16 values",
+                values.len()
+            );
+            values
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect()
+        }
+
+        /// Signature algorithms including GREASE values, in wire order
+        fn signature_algorithms(&self) -> Vec<u16> {
+            self.u16_list(EXT_SIGNATURE_ALGORITHMS, 2)
+        }
+
+        /// JA4 TLS client fingerprint (FoxIO spec) of this ClientHello
+        fn ja4(&self) -> String {
+            let version = self
+                .u16_list(EXT_SUPPORTED_VERSIONS, 1)
+                .into_iter()
+                .filter(|v| !is_grease(*v))
+                .max()
+                .unwrap_or(0x0303);
+            let version = match version {
+                0x0304 => "13",
+                0x0303 => "12",
+                _ => "00",
+            };
+            let sni = if self.extension(EXT_SERVER_NAME).is_some() {
+                'd'
+            } else {
+                'i'
+            };
+            let alpn = self
+                .extension(EXT_ALPN)
+                .and_then(|d| d.get(3..3 + *d.get(2)? as usize))
+                .map(|p| format!("{}{}", p[0] as char, p[p.len() - 1] as char))
+                .unwrap_or_else(|| "00".to_string());
+
+            let hash = |s: String| -> String {
+                openssl::sha::sha256(s.as_bytes())
+                    .iter()
+                    .take(6)
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            };
+            let join = |mut v: Vec<u16>, sort: bool| -> String {
+                if sort {
+                    v.sort_unstable();
+                }
+                v.iter()
+                    .map(|x| format!("{x:04x}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+
+            let exts: Vec<u16> = self
+                .extensions
+                .iter()
+                .copied()
+                .filter(|t| *t != EXT_SERVER_NAME && *t != EXT_ALPN)
+                .collect();
+            let sigalgs: Vec<u16> = self
+                .signature_algorithms()
+                .into_iter()
+                .filter(|v| !is_grease(*v))
+                .collect();
+            format!(
+                "t{version}{sni}{:02}{:02}{alpn}_{}_{}",
+                self.cipher_suites.len(),
+                self.extensions.len(),
+                hash(join(self.cipher_suites.clone(), true)),
+                hash(format!("{}_{}", join(exts, true), join(sigalgs, false))),
+            )
+        }
     }
 
     fn is_grease(v: u16) -> bool {
@@ -693,17 +916,20 @@ mod tests {
         let ext_end = offset + 2 + read_u16(record, offset) as usize;
         offset += 2;
         let mut extensions = Vec::new();
+        let mut extension_data = Vec::new();
         while offset < ext_end {
             let ext_type = read_u16(record, offset);
             let ext_len = read_u16(record, offset + 2) as usize;
             if !is_grease(ext_type) {
                 extensions.push(ext_type);
+                extension_data.push((ext_type, record[offset + 4..offset + 4 + ext_len].to_vec()));
             }
             offset += 4 + ext_len;
         }
         ClientHello {
             cipher_suites,
             extensions,
+            extension_data,
         }
     }
 
@@ -712,6 +938,24 @@ mod tests {
         builder: &OpensslInterceptionClientConfigBuilder,
         alpn_protocols: &[&str],
     ) -> ClientHello {
+        capture_client_hello_with_sni(builder, alpn_protocols, None)
+    }
+
+    /// Same as `capture_client_hello`, with an optional SNI host name
+    fn capture_client_hello_with_sni(
+        builder: &OpensslInterceptionClientConfigBuilder,
+        alpn_protocols: &[&str],
+        sni: Option<&str>,
+    ) -> ClientHello {
+        let server_name = sni.map(|host| {
+            // server_name extension body: list length, name type 0, name length, name
+            let mut ext = Vec::new();
+            ext.extend_from_slice(&((host.len() + 3) as u16).to_be_bytes());
+            ext.push(0);
+            ext.extend_from_slice(&(host.len() as u16).to_be_bytes());
+            ext.extend_from_slice(host.as_bytes());
+            TlsServerName::from_extension_value(&ext).unwrap()
+        });
         let config = builder.build().unwrap();
         let upstream = UpstreamAddr::from_host_str_and_port("www.example.com", 443).unwrap();
         let mut wired = vec![0u8, 0u8];
@@ -723,7 +967,9 @@ mod tests {
         wired[..2].copy_from_slice(&list_len.to_be_bytes());
         let alpn = TlsAlpn::from_extension_value(&wired).unwrap();
 
-        let ssl = config.build_ssl(None, &upstream, Some(&alpn)).unwrap();
+        let ssl = config
+            .build_ssl(server_name.as_ref(), &upstream, Some(&alpn))
+            .unwrap();
         let recorder = ClientHelloRecorder {
             written: Vec::new(),
         };
@@ -778,5 +1024,107 @@ mod tests {
 
         assert!(!hello.extensions.contains(&EXT_ECH));
         assert!(!hello.extensions.contains(&EXT_ALPS_NEW_CODEPOINT));
+        assert!(!hello.extensions.contains(&EXT_TRUST_ANCHORS));
+    }
+
+    /// Everything the production config sets, with the Chrome 156 reference values
+    #[cfg(boringssl)]
+    fn chrome_156_builder() -> OpensslInterceptionClientConfigBuilder {
+        let mut builder = chrome_like_builder();
+        builder.set_min_tls_version(TlsVersion::TLS1_2);
+        builder.set_max_tls_version(TlsVersion::TLS1_3);
+        builder.set_supported_groups(CHROME_SUPPORTED_GROUPS.to_string());
+        builder.set_use_ocsp_stapling(true);
+        builder.set_enable_sct(true);
+        builder.set_enable_grease(true);
+        builder.set_permute_extensions(true);
+        builder.set_signature_algorithms(CHROME_156_SIGNATURE_ALGORITHMS.to_string());
+        builder.set_trust_anchor_ids(hex_decode(CHROME_156_TRUST_ANCHOR_IDS));
+        builder
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn signature_algorithms_like_chrome_156() {
+        let hello = capture_client_hello(&chrome_156_builder(), &["h2", "http/1.1"]);
+        let sigalgs = hello.signature_algorithms();
+
+        // GREASE first, like Chrome
+        assert!(is_grease(sigalgs[0]), "no GREASE in {sigalgs:04x?}");
+        assert_eq!(sigalgs[1..], CHROME_156_SIGALG_CODES);
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn trust_anchors_like_chrome_156() {
+        let hello = capture_client_hello(&chrome_156_builder(), &["h2", "http/1.1"]);
+        let ids = hex_decode(CHROME_156_TRUST_ANCHOR_IDS);
+
+        let mut expected = (ids.len() as u16).to_be_bytes().to_vec();
+        expected.extend_from_slice(&ids);
+        assert_eq!(
+            hello.extension(EXT_TRUST_ANCHORS),
+            Some(expected.as_slice())
+        );
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn empty_trust_anchor_ids_still_send_extension() {
+        let mut builder = OpensslInterceptionClientConfigBuilder::default();
+        builder.set_trust_anchor_ids(Vec::new());
+        let hello = capture_client_hello(&builder, &["h2", "http/1.1"]);
+
+        // only the zero 16-bit length of the ID list
+        assert_eq!(
+            hello.extension(EXT_TRUST_ANCHORS),
+            Some([0u8, 0].as_slice())
+        );
+    }
+
+    #[test]
+    fn ja4_helper_matches_chrome_156_raw_fingerprint() {
+        // Lists from ja4_r of the Chrome 156 reference capture
+        let ciphers = [
+            0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b, 0xc02c,
+            0xc02f, 0xc030, 0xcca8, 0xcca9,
+        ];
+        let other_exts = [
+            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0017, 0x001b, 0x0023, 0x002b, 0x002d, 0x0033,
+            0x44cd, 0xca34, 0xfe0d, 0xff01,
+        ];
+        let mut sigalgs = vec![0x00, 0x16];
+        for c in CHROME_156_SIGALG_CODES {
+            sigalgs.extend_from_slice(&c.to_be_bytes());
+        }
+        let mut extension_data: Vec<(u16, Vec<u8>)> = other_exts
+            .iter()
+            .map(|t| match *t {
+                EXT_SIGNATURE_ALGORITHMS => (*t, sigalgs.clone()),
+                EXT_SUPPORTED_VERSIONS => (*t, vec![0x04, 0x03, 0x04, 0x03, 0x03]),
+                _ => (*t, Vec::new()),
+            })
+            .collect();
+        extension_data.push((EXT_SERVER_NAME, b"\x00\x00".to_vec()));
+        extension_data.push((EXT_ALPN, b"\x00\x03\x02h2".to_vec()));
+        let hello = ClientHello {
+            cipher_suites: ciphers.to_vec(),
+            extensions: extension_data.iter().map(|(t, _)| *t).collect(),
+            extension_data,
+        };
+
+        assert_eq!(hello.ja4(), CHROME_156_JA4);
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn ja4_matches_chrome_156() {
+        let hello = capture_client_hello_with_sni(
+            &chrome_156_builder(),
+            &["h2", "http/1.1"],
+            Some("tls.peet.ws"),
+        );
+
+        assert_eq!(hello.ja4(), CHROME_156_JA4);
     }
 }
