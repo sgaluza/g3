@@ -675,9 +675,10 @@ The keys are:
   can't carry, a fallback to a static value and a GREASE use different from ``enable_grease``
   are logged as a warning for the connection.
 
-  ``use_ocsp_stapling``, ``enable_sct``, ``enable_ech_grease``, ``enable_alps`` and
-  ``trust_anchor_ids`` only apply if the client ClientHello can't be parsed for mirroring.
-  User-site TLS client configs, TLCP and STARTTLS keep the static ClientHello.
+  The whole static ClientHello is sent instead, with a warning, if the client ClientHello can't
+  be parsed for mirroring or copying it to the upstream one fails. ``use_ocsp_stapling``,
+  ``enable_sct``, ``enable_ech_grease``, ``enable_alps`` and ``trust_anchor_ids`` only apply in
+  these two cases. User-site TLS client configs, TLCP and STARTTLS keep the static ClientHello.
 
   Only supported for BoringSSL.
 
