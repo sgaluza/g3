@@ -17,7 +17,7 @@ pub(super) const EXT_PRE_SHARED_KEY: u16 = 0x0029;
 const EXT_KEY_SHARE: u16 = 0x0033;
 const EXT_ALPS_OLD: u16 = 0x4469;
 const EXT_ALPS_NEW: u16 = 0x44cd;
-const EXT_TRUST_ANCHORS: u16 = 0xca34;
+pub(super) const EXT_TRUST_ANCHORS: u16 = 0xca34;
 const EXT_ECH: u16 = 0xfe0d;
 
 /// RFC 8701 GREASE value: 0x?A?A with equal bytes

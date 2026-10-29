@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use openssl::foreign_types::ForeignTypeRef;
 use openssl::ssl::Ssl;
 
+use super::browser_hello::EXT_TRUST_ANCHORS;
 use super::{BrowserClientHello, MirrorReport};
 use crate::net::TlsAlpn;
 
@@ -180,7 +181,7 @@ pub(super) fn apply_browser_hello(
         if validate_trust_anchor_ids(ids).is_ok() {
             set_trust_anchors(ssl, ids)?;
         } else {
-            report.unsupported_extensions.push(0xca34);
+            report.unsupported_extensions.push(EXT_TRUST_ANCHORS);
         }
     }
     if browser.status_request {
