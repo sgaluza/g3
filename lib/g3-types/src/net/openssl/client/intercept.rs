@@ -22,6 +22,29 @@ use crate::net::{TlsAlpn, TlsServerName, TlsVersion, UpstreamAddr};
 #[cfg(boringssl)]
 const CHROME_H2_ALPS_SETTINGS: [u8; 24] = crate::net::ChromeH2Settings::settings_payload();
 
+/// Check the wire format of a trust anchor ID list: a series of IDs, each
+/// prefixed by an 8-bit length, no empty ID, no ID past the end of the list
+#[cfg(boringssl)]
+fn validate_trust_anchor_ids(ids: &[u8]) -> anyhow::Result<()> {
+    let mut offset = 0usize;
+    while offset < ids.len() {
+        let len = ids[offset] as usize;
+        if len == 0 {
+            return Err(anyhow!(
+                "invalid trust_anchor_ids: empty ID at byte offset {offset}"
+            ));
+        }
+        let left = ids.len() - offset - 1;
+        if len > left {
+            return Err(anyhow!(
+                "invalid trust_anchor_ids: ID at byte offset {offset} needs {len} bytes, only {left} left"
+            ));
+        }
+        offset += 1 + len;
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct ContextPair {
     ssl_context: SslContext,
@@ -197,6 +220,26 @@ impl OpensslInterceptionClientConfigBuilder {
             self.handshake_timeout = MINIMAL_HANDSHAKE_TIMEOUT;
         }
 
+        #[cfg(boringssl)]
+        self.check_signature_algorithms_and_trust_anchors()?;
+
+        Ok(())
+    }
+
+    /// Validate values that BoringSSL only checks when the SSL context is built
+    /// (or never checks), so that a broken config fails on parse and `g3proxy -t`
+    #[cfg(boringssl)]
+    fn check_signature_algorithms_and_trust_anchors(&self) -> anyhow::Result<()> {
+        if !self.signature_algorithms.is_empty() {
+            let mut ctx_builder = SslContextBuilder::new(SslMethod::tls_client())
+                .map_err(|e| anyhow!("failed to create ssl context builder: {e}"))?;
+            // keep the cause: an unknown name and a NUL byte are reported differently
+            self.build_set_signature_algorithms(&mut ctx_builder)
+                .map_err(|e| anyhow!("invalid signature_algorithms: {e}"))?;
+        }
+        if let Some(ids) = &self.trust_anchor_ids {
+            validate_trust_anchor_ids(ids)?;
+        }
         Ok(())
     }
 
@@ -406,6 +449,8 @@ impl OpensslInterceptionClientConfigBuilder {
         let Some(ids) = &self.trust_anchor_ids else {
             return Ok(());
         };
+        // BoringSSL doesn't check the list, a broken one makes peers abort the handshake
+        validate_trust_anchor_ids(ids)?;
         // SAFETY: the pointer is a valid SSL_CTX, BoringSSL copies the buffer
         let r = unsafe {
             openssl_sys::SSL_CTX_set1_requested_trust_anchors(
@@ -1080,6 +1125,45 @@ mod tests {
             hello.extension(EXT_TRUST_ANCHORS),
             Some([0u8, 0].as_slice())
         );
+    }
+
+    /// check() runs when the config is parsed (also for `g3proxy -t`)
+    #[test]
+    #[cfg(boringssl)]
+    fn check_rejects_unknown_signature_algorithm() {
+        let mut builder = OpensslInterceptionClientConfigBuilder::default();
+        builder.set_signature_algorithms("mldsa44:rsa_pss_rsae_sha265".to_string());
+
+        let e = builder.check().unwrap_err().to_string();
+        assert!(e.contains("signature_algorithms"), "{e}");
+        assert!(e.contains("rsa_pss_rsae_sha265"), "{e}");
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn check_rejects_broken_trust_anchor_ids() {
+        // zero length ID, length past the end of the list, truncated second entry
+        for ids in [
+            vec![0x00],
+            vec![0x05, 0x82, 0xdf],
+            vec![0x02, 0xaa, 0xbb, 0x03, 0xcc],
+        ] {
+            let mut builder = OpensslInterceptionClientConfigBuilder::default();
+            builder.set_trust_anchor_ids(ids.clone());
+            let e = builder.check().unwrap_err().to_string();
+            assert!(e.contains("trust_anchor_ids"), "{ids:02x?}: {e}");
+        }
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn check_accepts_chrome_156_reference() {
+        let mut builder = chrome_156_builder();
+        builder.check().unwrap();
+
+        let mut builder = OpensslInterceptionClientConfigBuilder::default();
+        builder.set_trust_anchor_ids(Vec::new());
+        builder.check().unwrap();
     }
 
     #[test]
