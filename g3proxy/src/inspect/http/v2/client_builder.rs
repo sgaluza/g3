@@ -194,6 +194,35 @@ mod tests {
         read_fingerprint(&mut srv).await
     }
 
+    #[test]
+    fn hpack_int_prefix_and_continuation() {
+        // fits into the prefix
+        assert_eq!(hpack_int(&[0x0a], 5), (10, 1));
+        // RFC 7541 C.1.2: 1337 with a 5-bit prefix
+        assert_eq!(hpack_int(&[0x1f, 0x9a, 0x0a], 5), (1337, 3));
+        // bits above the prefix (H flag, representation type) are ignored
+        assert_eq!(hpack_int(&[0x8c], 7), (12, 1));
+    }
+
+    #[test]
+    fn pseudo_order_skips_size_update_and_huffman_values() {
+        let block = [
+            0x3f, 0xe1, 0x1f, // dynamic table size update to 4096
+            0x82, // :method GET, indexed
+            0x41, 0x8c, // :authority, literal with indexing, Huffman, 12 bytes
+            0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4,
+            0xff, // www.example.com
+            0x87, // :scheme https, indexed
+            0x84, // :path /, indexed
+            0x40, 0x03, b'f', b'o', b'o', 0x03, b'b', b'a', b'r', // regular header, new name
+        ];
+        assert_eq!(pseudo_order(&block), "m,a,s,p");
+
+        // literal without indexing and never indexed representations
+        let block = [0x82, 0x04, 0x01, b'/', 0x87, 0x11, 0x02, b'h', b'1'];
+        assert_eq!(pseudo_order(&block), "m,p,s,a");
+    }
+
     #[tokio::test]
     async fn default_profile_unchanged() {
         let config = H2InterceptionConfig::default();
