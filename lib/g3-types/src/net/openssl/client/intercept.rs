@@ -72,7 +72,18 @@ impl ContextPair {
         upstream: &UpstreamAddr,
         alpn_ext: Option<&TlsAlpn>,
     ) -> anyhow::Result<Ssl> {
-        let ssl = self.new_ssl(server_name, upstream, alpn_ext, true)?;
+        self.build_static_ssl(server_name, upstream, alpn_ext, true)
+    }
+
+    /// Ssl with the static ClientHello; a cached session is only resumed if `resume`
+    fn build_static_ssl(
+        &self,
+        server_name: Option<&TlsServerName>,
+        upstream: &UpstreamAddr,
+        alpn_ext: Option<&TlsAlpn>,
+        resume: bool,
+    ) -> anyhow::Result<Ssl> {
+        let ssl = self.new_ssl(server_name, upstream, alpn_ext, resume)?;
         #[cfg(boringssl)]
         let ssl = {
             let mut ssl = ssl;
@@ -201,13 +212,31 @@ impl OpensslInterceptionClientConfig {
             Some(b) if self.mirror_client_hello() => mirror_or_static(
                 self.ssl_context_pair
                     .build_mirror_ssl(server_name, upstream, alpn_ext, b),
-                || self.build_ssl(server_name, upstream, alpn_ext),
+                || self.static_fallback_ssl(server_name, upstream, alpn_ext, b),
             ),
             _ => {
                 let ssl = self.build_ssl(server_name, upstream, alpn_ext)?;
                 Ok((ssl, MirrorReport::default()))
             }
         }
+    }
+
+    /// Static Ssl sent instead of a mirrored one that failed, with the same
+    /// resumption rule as the mirror: resume only if the browser does
+    #[cfg(boringssl)]
+    fn static_fallback_ssl(
+        &self,
+        server_name: Option<&TlsServerName>,
+        upstream: &UpstreamAddr,
+        alpn_ext: Option<&TlsAlpn>,
+        browser: &BrowserClientHello,
+    ) -> anyhow::Result<Ssl> {
+        self.ssl_context_pair.build_static_ssl(
+            server_name,
+            upstream,
+            alpn_ext,
+            browser.resumes_session(),
+        )
     }
 
     #[cfg(not(boringssl))]
@@ -1123,6 +1152,11 @@ mod tests {
         let (ssl, report) = config
             .build_mirror_ssl(server_name.as_ref(), &upstream, Some(&alpn), browser)
             .unwrap();
+        (capture_ssl(ssl), report)
+    }
+
+    /// Raw ClientHello record sent by `ssl`
+    fn capture_ssl(ssl: Ssl) -> Vec<u8> {
         let recorder = ClientHelloRecorder {
             written: Vec::new(),
         };
@@ -1130,7 +1164,7 @@ mod tests {
             Err(openssl::ssl::HandshakeError::WouldBlock(mid)) => mid,
             _ => panic!("handshake should stop waiting for ServerHello"),
         };
-        (mid.get_ref().written.clone(), report)
+        mid.get_ref().written.clone()
     }
 
     fn chrome_like_builder() -> OpensslInterceptionClientConfigBuilder {
@@ -1657,6 +1691,29 @@ mod tests {
             capture_record_with_config(&config, &["h2"], Some("www.example.com"), Some(&resuming));
         let hello = parse_client_hello(&record);
         assert!(hello.extensions.contains(&EXT_PRE_SHARED_KEY));
+    }
+
+    /// The static Ssl used when mirroring fails keeps the resumption rule of the mirror
+    #[test]
+    #[cfg(boringssl)]
+    fn mirror_fallback_resumes_only_if_browser_resumes() {
+        let mut builder = mirror_builder();
+        builder.set_insecure(true);
+        let config = builder.build().unwrap();
+        prime_session_cache(&config);
+
+        let fresh = browser_hello(CHROME_156_CLIENT_HELLO);
+        let ssl = config
+            .static_fallback_ssl(None, &test_upstream(), None, &fresh)
+            .unwrap();
+        assert!(!browser_hello(&capture_ssl(ssl)).resumes_session());
+
+        let mut resuming = fresh.clone();
+        resuming.extensions.push(EXT_PRE_SHARED_KEY);
+        let ssl = config
+            .static_fallback_ssl(None, &test_upstream(), None, &resuming)
+            .unwrap();
+        assert!(browser_hello(&capture_ssl(ssl)).resumes_session());
     }
 
     /// Without mirroring the cached session is resumed as before
