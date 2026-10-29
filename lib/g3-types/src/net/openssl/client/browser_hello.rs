@@ -133,14 +133,17 @@ impl BrowserClientHello {
             }
             EXT_ALPS_OLD | EXT_ALPS_NEW => {
                 let mut list = u16_prefixed(body, "application_settings")?;
+                // BoringSSL sends ALPS on one codepoint only: with both, the last one wins
+                let mut protocols = Vec::new();
                 while let Some((&len, rest)) = list.split_first() {
                     let len = len as usize;
                     if len == 0 || rest.len() < len {
                         return Err(anyhow!("application_settings: broken protocol name"));
                     }
-                    self.alps_protocols.push(rest[..len].to_vec());
+                    protocols.push(rest[..len].to_vec());
                     list = &rest[len..];
                 }
+                self.alps_protocols = protocols;
                 self.alps_new_codepoint = ext_type == EXT_ALPS_NEW;
             }
             EXT_TRUST_ANCHORS => {

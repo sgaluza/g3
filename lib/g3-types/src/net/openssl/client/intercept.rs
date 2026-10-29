@@ -1432,6 +1432,19 @@ mod tests {
     }
 
     #[test]
+    fn browser_hello_alps_on_both_codepoints_keeps_one_list() {
+        // ALPS with h2 on the old codepoint, then on the new one
+        let exts = [
+            0x44, 0x69, 0x00, 0x05, 0x00, 0x03, 0x02, b'h', b'2', // 0x4469
+            0x44, 0xcd, 0x00, 0x05, 0x00, 0x03, 0x02, b'h', b'2', // 0x44cd
+        ];
+        let b = BrowserClientHello::parse(&[0xc0, 0x2b], Some(&exts)).unwrap();
+
+        assert_eq!(b.alps_protocols, [b"h2".to_vec()]);
+        assert!(b.alps_new_codepoint);
+    }
+
+    #[test]
     fn browser_hello_rejects_broken_lengths() {
         // odd cipher suites body
         assert!(BrowserClientHello::parse(&[0xc0, 0x2b, 0x00], None).is_err());
