@@ -424,9 +424,7 @@ where
                     calibration::identity()
                 );
                 if let Some(path) = c.mirror_calibrated_file() {
-                    if let Err(e) = calibration::mark_calibrated(path, &client.to_string()).await {
-                        warn!("failed to write calibrated file {}: {e}", path.display());
-                    }
+                    calibration::spawn_mark_calibrated(path.to_path_buf(), client.to_string());
                 }
             }
             if learned.settings_changed {

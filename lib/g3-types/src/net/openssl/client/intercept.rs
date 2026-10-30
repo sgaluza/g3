@@ -302,15 +302,15 @@ impl OpensslInterceptionClientConfig {
 
     /// SETTINGS payload for the ALPS of the client: learned, or Chrome's
     #[cfg(boringssl)]
-    fn alps_settings(&self, client: Option<&ClientProfileKey>) -> Vec<u8> {
-        client
-            .and_then(|c| self.profiles.get(c))
-            .and_then(|p| p.h2_settings)
+    fn alps_settings(profile: Option<&ClientProfile>) -> Vec<u8> {
+        profile
+            .and_then(|p| p.h2_settings.clone())
             .unwrap_or_else(|| mirror::CHROME_H2_ALPS_SETTINGS.to_vec())
     }
 
     /// Strict mirroring: a full copy of the browser ClientHello or an error.
     /// Only calibrated clients reach hosts other than the calibration site.
+    /// `profile` is what is learned about `client`, looked up once by the caller.
     #[cfg(boringssl)]
     fn build_strict_ssl(
         &self,
@@ -319,6 +319,7 @@ impl OpensslInterceptionClientConfig {
         alpn_ext: Option<&TlsAlpn>,
         browser: Option<&BrowserClientHello>,
         client: Option<&ClientProfileKey>,
+        profile: Option<&ClientProfile>,
     ) -> anyhow::Result<Ssl> {
         let browser = browser
             .ok_or_else(|| anyhow!("strict mirror: the client ClientHello was not parsed"))?;
@@ -326,9 +327,7 @@ impl OpensslInterceptionClientConfig {
             Some(name) => name.as_ref().to_string(),
             None => upstream.host().to_string(),
         };
-        let calibrated = client
-            .and_then(|c| self.profiles.get(c))
-            .is_some_and(|p| p.calibrated);
+        let calibrated = profile.is_some_and(|p| p.calibrated);
         if !calibrated && !self.is_calibration_host(&host) {
             let client = client
                 .map(|c| c.to_string())
@@ -342,7 +341,7 @@ impl OpensslInterceptionClientConfig {
             upstream,
             alpn_ext,
             browser,
-            &self.alps_settings(client),
+            &Self::alps_settings(profile),
         ))
     }
 
@@ -360,15 +359,25 @@ impl OpensslInterceptionClientConfig {
         client: Option<&ClientProfileKey>,
     ) -> anyhow::Result<(Ssl, MirrorReport)> {
         let pair = &self.ssl_context_pair;
-        let alps = self.alps_settings(client);
+        // one lookup per handshake: the profiles are shared by all connections
+        let profile = client.and_then(|c| self.profiles.get(c));
         if !self.mirror_client_hello() {
+            let alps = Self::alps_settings(profile.as_ref());
             let ssl = pair.build_static_ssl(server_name, upstream, alpn_ext, true, &alps)?;
             return Ok((ssl, MirrorReport::default()));
         }
         if self.mirror_strict() {
-            let ssl = self.build_strict_ssl(server_name, upstream, alpn_ext, browser, client)?;
+            let ssl = self.build_strict_ssl(
+                server_name,
+                upstream,
+                alpn_ext,
+                browser,
+                client,
+                profile.as_ref(),
+            )?;
             return Ok((ssl, MirrorReport::default()));
         }
+        let alps = Self::alps_settings(profile.as_ref());
         match browser {
             Some(b) => mirror_or_static(
                 pair.build_mirror_ssl(server_name, upstream, alpn_ext, b, &alps),
