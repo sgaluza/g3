@@ -66,6 +66,9 @@ const FRAME_PRIORITY: u8 = 0x2;
 const FRAME_SETTINGS: u8 = 0x4;
 const FRAME_WINDOW_UPDATE: u8 = 0x8;
 
+/// Largest flow control window (RFC 9113 section 6.9.1)
+const MAX_WINDOW_SIZE: u32 = 0x7fff_ffff;
+
 const FLAG_ACK: u8 = 0x1;
 const FLAG_END_HEADERS: u8 = 0x4;
 const FLAG_PADDED: u8 = 0x8;
@@ -125,7 +128,10 @@ impl H2ClientPreface {
                 FRAME_WINDOW_UPDATE if frame.stream_id == 0 => {
                     let increment = <[u8; 4]>::try_from(frame.payload)
                         .map_err(|_| H2PrefaceParseError::InvalidFrame("WINDOW_UPDATE"))?;
-                    preface.window_update = Some(u32::from_be_bytes(increment) & 0x7fff_ffff);
+                    // increments add up (RFC 9113 section 6.9), up to the largest window
+                    let increment = u32::from_be_bytes(increment) & MAX_WINDOW_SIZE;
+                    let total = preface.window_update.unwrap_or(0).saturating_add(increment);
+                    preface.window_update = Some(total.min(MAX_WINDOW_SIZE));
                 }
                 FRAME_PRIORITY => preface.priority_frames += 1,
                 FRAME_HEADERS => {
@@ -342,6 +348,25 @@ mod tests {
         assert_eq!(p.settings, CHROME_SETTINGS);
         assert_eq!(p.window_update, Some(15663105));
         assert_eq!(p.headers, None);
+    }
+
+    #[test]
+    fn window_updates_add_up() {
+        // RFC 9113 section 6.9: increments are additive, the window can't pass 2^31-1
+        let mut flight = PREFACE.to_vec();
+        flight.extend(frame(0x4, 0, 0, &[]));
+        flight.extend(frame(0x8, 0, 0, &100u32.to_be_bytes()));
+        flight.extend(frame(0x8, 0, 3, &7u32.to_be_bytes())); // a stream window, not counted
+        flight.extend(frame(0x8, 0, 0, &200u32.to_be_bytes()));
+        let p = H2ClientPreface::parse(&flight).unwrap().unwrap();
+        assert_eq!(p.window_update, Some(300));
+
+        let mut flight = PREFACE.to_vec();
+        flight.extend(frame(0x4, 0, 0, &[]));
+        flight.extend(frame(0x8, 0, 0, &0x7fff_ffffu32.to_be_bytes()));
+        flight.extend(frame(0x8, 0, 0, &0x7fff_ffffu32.to_be_bytes()));
+        let p = H2ClientPreface::parse(&flight).unwrap().unwrap();
+        assert_eq!(p.window_update, Some(0x7fff_ffff));
     }
 
     #[test]

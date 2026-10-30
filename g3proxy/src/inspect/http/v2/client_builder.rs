@@ -3,6 +3,7 @@
  */
 
 use std::fmt;
+use std::time::Duration;
 
 use h2::client::PseudoHeader;
 
@@ -77,7 +78,7 @@ impl fmt::Display for H2MirrorReport {
             parts.push(format!("SETTINGS not sent: {}", ids.join(",")));
         }
         if self.settings_reordered {
-            parts.push("SETTINGS sent in ascending id order".to_string());
+            parts.push("client SETTINGS order not kept, sent in ascending id order".to_string());
         }
         if self.priority_frames > 0 {
             parts.push(format!("{} PRIORITY frames not sent", self.priority_frames));
@@ -135,38 +136,66 @@ fn pseudo_order(client: &[H2PseudoHeader]) -> [PseudoHeader; 4] {
     order
 }
 
+/// Client SETTINGS the h2 client can send, as it sends them
+struct MirroredSettings {
+    /// (id, value) in ascending id order, the last value of a repeated id
+    sent: Vec<(u16, u32)>,
+    /// Ids not supported or with a value out of range
+    unsupported: Vec<u16>,
+    /// The client didn't send them in ascending id order
+    reordered: bool,
+}
+
+/// Pick the client SETTINGS the h2 client supports with valid values (the h2
+/// builder panics on some out of range values); h2 sends ids 1 to 6 ascending
+fn mirrored_settings(settings: &[(u16, u32)]) -> MirroredSettings {
+    let mut values: [Option<u32>; 6] = [None; 6];
+    let mut unsupported = Vec::new();
+    let mut reordered = false;
+    let mut last_id = 0;
+    for &(id, value) in settings {
+        reordered |= id < last_id;
+        last_id = last_id.max(id);
+        let valid = match id {
+            0x1 | 0x3 | 0x6 => true,
+            0x2 => value <= 1,
+            0x4 => value <= MAX_WINDOW_SIZE,
+            0x5 => MAX_FRAME_SIZE_RANGE.contains(&value),
+            _ => false,
+        };
+        if valid {
+            values[id as usize - 1] = Some(value);
+        } else {
+            unsupported.push(id);
+        }
+    }
+    let sent = (1u16..)
+        .zip(values)
+        .filter_map(|(id, v)| v.map(|v| (id, v)))
+        .collect();
+    MirroredSettings {
+        sent,
+        unsupported,
+        reordered,
+    }
+}
+
 /// Settings and request framing copied from the client first flight
 fn set_mirror(builder: &mut h2::client::Builder, preface: &H2ClientPreface) -> H2MirrorReport {
     let mut report = H2MirrorReport::default();
 
-    let mut last_id = 0;
-    for &(id, value) in &preface.settings {
-        if id < last_id {
-            report.settings_reordered = true;
-        }
-        last_id = last_id.max(id);
+    let settings = mirrored_settings(&preface.settings);
+    report.unknown_settings = settings.unsupported;
+    report.settings_reordered = settings.reordered;
+    for (id, value) in settings.sent {
         match id {
-            0x1 => {
-                builder.header_table_size(value);
-            }
-            0x2 if value <= 1 => {
-                builder.enable_push(value == 1);
-            }
-            0x3 => {
-                builder.max_concurrent_streams(value);
-            }
-            0x4 if value <= MAX_WINDOW_SIZE => {
-                builder.initial_window_size(value);
-            }
-            // the h2 builder panics on a value out of range
-            0x5 if MAX_FRAME_SIZE_RANGE.contains(&value) => {
-                builder.max_frame_size(value);
-            }
-            0x6 => {
-                builder.max_header_list_size(value);
-            }
-            _ => report.unknown_settings.push(id),
-        }
+            0x1 => builder.header_table_size(value),
+            0x2 => builder.enable_push(value == 1),
+            0x3 => builder.max_concurrent_streams(value),
+            0x4 => builder.initial_window_size(value),
+            0x5 => builder.max_frame_size(value),
+            _ => builder.max_header_list_size(value),
+        };
     }
 
     // the connection WINDOW_UPDATE increment is the window above the default one
@@ -191,6 +220,23 @@ fn set_mirror(builder: &mut h2::client::Builder, preface: &H2ClientPreface) -> H
         }
     }
     report
+}
+
+/// SETTINGS payload the mirror profile sends upstream for this first flight,
+/// as h2 encodes it, for the ALPS of later upstream TLS connections
+pub(super) fn mirror_alps_settings(preface: &H2ClientPreface) -> Vec<u8> {
+    let sent = mirrored_settings(&preface.settings).sent;
+    let mut payload = Vec::with_capacity(sent.len() * 6);
+    for (id, value) in sent {
+        payload.extend_from_slice(&id.to_be_bytes());
+        payload.extend_from_slice(&value.to_be_bytes());
+    }
+    payload
+}
+
+/// Time left of `budget` after `spent`, for a timeout shared by two steps
+pub(super) fn remaining_budget(budget: Duration, spent: Duration) -> Duration {
+    budget.saturating_sub(spent)
 }
 
 /// Builder of the h2 client connection to the upstream server.
@@ -579,6 +625,44 @@ mod tests {
         };
         assert!(reordered.is_notable());
         assert!(!H2MirrorReport::default().is_notable());
+    }
+
+    #[test]
+    fn alps_settings_of_chrome_are_chrome() {
+        assert_eq!(
+            mirror_alps_settings(&chrome_preface()),
+            ChromeH2Settings::settings_payload()
+        );
+    }
+
+    /// ALPS carries what the upstream SETTINGS frame carries: supported ids and
+    /// valid values only, in the ascending order h2 sends them
+    #[test]
+    fn alps_settings_are_the_sent_ones() {
+        let mut preface = firefox_preface();
+        preface.settings = vec![(4, 131072), (1, 65536), (9, 1), (0x0a0a, 0), (5, 100)];
+
+        let mut expected = Vec::new();
+        for (id, value) in [(1u16, 65536u32), (4, 131072)] {
+            expected.extend_from_slice(&id.to_be_bytes());
+            expected.extend_from_slice(&value.to_be_bytes());
+        }
+        assert_eq!(mirror_alps_settings(&preface), expected);
+    }
+
+    #[test]
+    fn remaining_budget_after_preface() {
+        use std::time::Duration;
+
+        let budget = Duration::from_secs(4);
+        assert_eq!(
+            remaining_budget(budget, Duration::from_millis(1500)),
+            Duration::from_millis(2500)
+        );
+        assert_eq!(
+            remaining_budget(budget, Duration::from_secs(5)),
+            Duration::ZERO
+        );
     }
 
     #[tokio::test]

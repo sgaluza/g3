@@ -833,9 +833,10 @@ The keys are:
     priority. If the first flight has no request yet (a Chrome preconnect), the pseudo
     header order and priority of the chrome profile are used; without a first flight at
     all, the whole chrome profile. PRIORITY frames of the client are not copied. What
-    could not be copied is logged as a warning for the connection.
+    could not be copied is logged as a warning for the connection. Reading the first flight
+    and the h2 handshake with the client share one ``client_handshake_timeout``.
 
-    The SETTINGS seen from the client are also remembered for the ALPS of later upstream
+    The SETTINGS the upstream connection sends are also remembered for the ALPS of later upstream
     TLS connections (see ``mirror_client_hello`` and ``enable_alps`` of
     :ref:`tls interception client <conf_value_dpi_tls_interception_client>`). The TLS
     handshake with the upstream comes before the client SETTINGS, so the first connection

@@ -5,7 +5,7 @@
 
 use std::future::poll_fn;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_recursion::async_recursion;
 use bytes::Bytes;
@@ -345,7 +345,9 @@ where
         } = self.io.take().unwrap();
 
         let http_config = self.ctx.h2_interception();
-        // the mirror profile needs the client first flight before the upstream handshake
+        // the mirror profile needs the client first flight before the upstream handshake;
+        // it takes from the same client handshake timeout as the h2 handshake below
+        let preface_started = Instant::now();
         let (clt_r, client_preface) = if http_config.upstream_profile == H2UpstreamProfile::Mirror {
             match tokio::time::timeout(
                 http_config.client_handshake_timeout,
@@ -359,9 +361,14 @@ where
         } else {
             (clt_r, None)
         };
+        let client_handshake_timeout = client_builder::remaining_budget(
+            http_config.client_handshake_timeout,
+            preface_started.elapsed(),
+        );
         if let (Some(p), Some(tls)) = (&client_preface, self.ctx.tls_interception()) {
-            // the TLS of this connection is done already: its ALPS had the old SETTINGS
-            if tls.remember_h2_settings(&p.settings_payload()) {
+            // the TLS of this connection is done already: its ALPS had the old SETTINGS.
+            // ALPS gets the SETTINGS the upstream connection really sends.
+            if tls.remember_h2_settings(&client_builder::mirror_alps_settings(p)) {
                 warn!(
                     "h2 SETTINGS of the client changed, ALPS to {} had other ones; \
                      next connections send the new ones",
@@ -419,7 +426,7 @@ where
         }
 
         let mut h2c_connection = match tokio::time::timeout(
-            http_config.client_handshake_timeout,
+            client_handshake_timeout,
             server_builder.handshake(tokio::io::join(clt_r, clt_w)),
         )
         .await

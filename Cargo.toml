@@ -249,7 +249,7 @@ g3-yaml = { version = "0.6", path = "lib/g3-yaml" }
 # When the h2 version in Cargo.lock moves (an h2 CVE, a g3proxy upstream update) rebase the patch
 # onto that h2 release and update the rev here; the long-term plan is to offer these options to
 # upstream hyperium/h2.
-h2 = { git = "https://github.com/sgaluza/h2", rev = "9112bc75da1f7e17e5a02ad296b67430fbf714cb" }
+h2 = { git = "https://github.com/sgaluza/h2", rev = "3912c5e75e41e159fb3203397914e723d48cd6f7" }
 
 [profile.release-lto]
 inherits = "release"
