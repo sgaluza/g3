@@ -707,7 +707,10 @@ The keys are:
   first flight that can't be copied in full. Clients reach hosts other than
   ``mirror_calibration_host`` only once calibrated: an h2 connection with a request has shown
   their SETTINGS and request framing, so that ALPS and preconnects carry theirs instead of
-  Chrome's. Rejected connections are logged as warnings with the identity of the pod
+  Chrome's. Until its request framing is learned, the h2 interception reads the first flight
+  of a client for up to 0.5s after SETTINGS, for the first request that Chrome may send in
+  a later TLS record; a preconnect holding the connection without one goes on after that.
+  Rejected connections are logged as warnings with the identity of the pod
   (``SESSION_ID``, ``BOT_ID``, ``POD_NAME``, ``NODE_NAME`` from the environment).
 
   Needs ``mirror_client_hello`` and ``mirror_calibration_host``. Only supported for BoringSSL.

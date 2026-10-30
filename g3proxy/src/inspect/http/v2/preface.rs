@@ -14,6 +14,21 @@ use g3_io_ext::OnceBufReader;
 /// Room for one read: a TLS record, larger than a whole Chrome first flight
 const READ_CHUNK: usize = 16 * 1024;
 
+/// How long to wait after SETTINGS for the first request of a client whose
+/// request framing is not learned yet; a preconnect sends none
+const REQUEST_WAIT: Duration = Duration::from_millis(500);
+
+/// The wait for the first request, for `read_client_preface`: only strict
+/// mirroring needs the request framing of a client, for its preconnects;
+/// without it they get Chrome framing, with no delay
+pub(super) fn request_wait(
+    mirror_strict: bool,
+    client_known: bool,
+    framing_learned: bool,
+) -> Option<Duration> {
+    (mirror_strict && client_known && !framing_learned).then_some(REQUEST_WAIT)
+}
+
 /// Read the client first flight up to the end of its first SETTINGS frame and
 /// parse it, without waiting for more. All bytes read stay in the returned
 /// reader for the h2 server. `None` if the stream is not an h2 preface, ends
@@ -88,7 +103,8 @@ mod tests {
         "/../lib/g3-dpi/tests/fixtures/chrome156-h2-first-flight.bin"
     ));
     const MAX_SIZE: usize = 64 * 1024;
-    const REQUEST_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+    /// Long enough for a request sent 100ms later in a test
+    const TEST_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
     /// Everything the h2 server would read from the returned reader
     async fn replayed(mut r: OnceBufReader<DuplexStream>) -> Vec<u8> {
@@ -183,7 +199,7 @@ mod tests {
 
         let (r, preface) = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            read_client_preface(OnceBufReader::with_no_buf(r), MAX_SIZE, Some(REQUEST_WAIT)),
+            read_client_preface(OnceBufReader::with_no_buf(r), MAX_SIZE, Some(TEST_WAIT)),
         )
         .await
         .expect("the request comes in 100ms");
@@ -222,13 +238,23 @@ mod tests {
         assert_eq!(out, CHROME_156);
     }
 
+    /// Without strict mirroring nothing waits: preconnects keep the 0.0.31
+    /// behaviour, Chrome framing at once
+    #[test]
+    fn request_wait_only_for_strict_and_unknown_framing() {
+        assert_eq!(request_wait(true, true, false), Some(REQUEST_WAIT));
+        assert_eq!(request_wait(false, true, false), None);
+        assert_eq!(request_wait(true, true, true), None);
+        assert_eq!(request_wait(true, false, false), None);
+    }
+
     /// A client that ends after SETTINGS still has its SETTINGS learned
     #[tokio::test]
     async fn waiting_for_the_request_keeps_settings_on_end() {
         let settings_end = 24 + 9 + 24;
         let data = &CHROME_156[..settings_end];
         let (r, preface) =
-            read_client_preface(reader(b"", data).await, MAX_SIZE, Some(REQUEST_WAIT)).await;
+            read_client_preface(reader(b"", data).await, MAX_SIZE, Some(TEST_WAIT)).await;
 
         let preface = preface.expect("SETTINGS came");
         assert_eq!(preface.settings.len(), 4);

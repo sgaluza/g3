@@ -26,8 +26,6 @@ const PER_CONNECTION_EXTENSIONS: [u16; 7] = [
     EXT_ALPS_NEW,
 ];
 
-/// Bytes of the sha256 in `profile_key`: 12 hex characters
-const PROFILE_KEY_BYTES: usize = 6;
 const EXT_KEY_SHARE: u16 = 0x0033;
 const EXT_ALPS_OLD: u16 = 0x4469;
 const EXT_ALPS_NEW: u16 = 0x44cd;
@@ -93,6 +91,9 @@ impl BrowserClientHello {
     /// connection are left out: server_name, ALPN, ALPS (only with h2 in ALPN),
     /// padding, pre_shared_key and early_data.
     pub fn profile_key(&self) -> String {
+        /// Bytes of the sha256 in the key: 12 hex characters
+        const PROFILE_KEY_BYTES: usize = 6;
+
         let mut suites = self.cipher_suites.clone();
         suites.sort_unstable();
         let mut extensions: Vec<u16> = self

@@ -39,10 +39,6 @@ mod preface;
 /// SETTINGS, WINDOW_UPDATE and a request HEADERS take
 const MAX_CLIENT_PREFACE_SIZE: usize = 64 * 1024;
 
-/// How long to wait after SETTINGS for the first request of a client whose
-/// request framing is not learned yet; a preconnect sends none
-const REQUEST_WAIT: Duration = Duration::from_millis(500);
-
 mod error;
 pub(crate) use error::{H2InterceptionError, H2StreamTransferError};
 
@@ -347,6 +343,17 @@ where
         Err(H2InterceptionError::ClientConnectionBlocked)
     }
 
+    /// A strict mirror refusal of this h2 connection: every one is logged with
+    /// the identity of the pod, the task log alone doesn't have it
+    fn strict_refusal(&self, reason: String) -> H2InterceptionError {
+        warn!(
+            "strict mirror refused h2 to {} for {}: {reason}",
+            self.upstream,
+            calibration::identity()
+        );
+        H2InterceptionError::MirrorStrict(reason)
+    }
+
     #[async_recursion]
     async fn do_intercept(&mut self) -> Result<(), H2InterceptionError> {
         let H2InterceptIo {
@@ -364,14 +371,20 @@ where
         // site, where the profile of the client is being learned
         let calibration_host =
             tls_client.is_some_and(|c| c.is_calibration_upstream(self.upstream.host()));
-        let strict = mirror && tls_client.is_some_and(|c| c.mirror_strict()) && !calibration_host;
+        let mirror_strict = mirror && tls_client.is_some_and(|c| c.mirror_strict());
+        let strict = mirror_strict && !calibration_host;
         let learned_request = match (tls_client, &self.client_profile) {
             (Some(c), Some(client)) => c.client_profile(client).and_then(|p| p.request),
             _ => None,
         };
         // until the request framing of the client is known, wait for its first
-        // request too: Chrome may send it in a later TLS record than SETTINGS
-        let wait_request = self.client_profile.is_some() && learned_request.is_none();
+        // request too: Chrome may send it in a later TLS record than SETTINGS.
+        // The calibration host is strict too here: it is where framing is learned.
+        let request_wait = preface::request_wait(
+            mirror_strict,
+            self.client_profile.is_some(),
+            learned_request.is_some(),
+        );
 
         // the mirror profile needs the client first flight before the upstream handshake;
         // it takes from the same client handshake timeout as the h2 handshake below
@@ -379,11 +392,7 @@ where
         let (clt_r, client_preface) = if mirror {
             match tokio::time::timeout(
                 http_config.client_handshake_timeout,
-                preface::read_client_preface(
-                    clt_r,
-                    MAX_CLIENT_PREFACE_SIZE,
-                    wait_request.then_some(REQUEST_WAIT),
-                ),
+                preface::read_client_preface(clt_r, MAX_CLIENT_PREFACE_SIZE, request_wait),
             )
             .await
             {
@@ -422,9 +431,8 @@ where
             }
             if learned.settings_changed {
                 if strict {
-                    return Err(H2InterceptionError::MirrorStrict(format!(
-                        "h2 SETTINGS of client {client} differ from the ALPS sent to {}",
-                        self.upstream
+                    return Err(self.strict_refusal(format!(
+                        "h2 SETTINGS of client {client} differ from the ALPS sent"
                     )));
                 }
                 warn!(
@@ -442,12 +450,7 @@ where
         );
         if strict {
             if let Some(e) = report.strict_error() {
-                warn!(
-                    "strict mirror refused h2 to {} for {}: {e}",
-                    self.upstream,
-                    calibration::identity()
-                );
-                return Err(H2InterceptionError::MirrorStrict(e));
+                return Err(self.strict_refusal(e));
             }
         }
         if report.is_notable() {
