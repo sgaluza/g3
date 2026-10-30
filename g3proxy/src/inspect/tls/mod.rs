@@ -22,7 +22,7 @@ use g3_dpi::{Protocol, ProtocolInspector};
 use g3_io_ext::{AsyncStream, FlexBufReader, OnceBufReader};
 use g3_slog_types::{LtUpstreamAddr, LtUuid, LtX509VerifyResult};
 use g3_types::net::{
-    AlpnProtocol, BrowserClientHello, OpensslInterceptionClientConfig,
+    AlpnProtocol, BrowserClientHello, ClientProfileKey, OpensslInterceptionClientConfig,
     OpensslInterceptionServerConfig, TlsAlpn, TlsServerName, UpstreamAddr,
 };
 use g3_udpdump::{
@@ -144,10 +144,9 @@ impl TlsInterceptionContext {
         })
     }
 
-    /// Send these client HTTP/2 SETTINGS in the ALPS of the next upstream
-    /// connections, true if they differ from what ALPS carried so far
-    pub(crate) fn remember_h2_settings(&self, payload: &[u8]) -> bool {
-        self.client_config.remember_h2_settings(payload)
+    /// Upstream TLS client config: mirroring, strict mode, client profiles
+    pub(crate) fn client_config(&self) -> &OpensslInterceptionClientConfig {
+        &self.client_config
     }
 
     pub(super) fn get_stream_dumper(&self, worker_id: Option<usize>) -> Option<&StreamDumper> {
@@ -265,6 +264,8 @@ pub(crate) struct TlsInterceptObject<SC: ServerConfig> {
     upstream: UpstreamAddr,
     tls_interception: TlsInterceptionContext,
     server_verify_result: Option<X509VerifyResult>,
+    /// Client profile of this connection, passed on to the h2 interception
+    client_profile: Option<ClientProfileKey>,
 }
 
 macro_rules! intercept_log {
@@ -293,6 +294,7 @@ impl<SC: ServerConfig> TlsInterceptObject<SC> {
             upstream,
             tls_interception: tls,
             server_verify_result: None,
+            client_profile: None,
         }
     }
 
@@ -494,6 +496,7 @@ where
             Protocol::Http2 => {
                 let mut h2_obj =
                     crate::inspect::http::H2InterceptObject::new(ctx, self.upstream.clone());
+                h2_obj.set_client_profile(self.client_profile.clone());
                 h2_obj.set_io(
                     OnceBufReader::with_no_buf(Box::new(clt_r)),
                     Box::new(clt_w),

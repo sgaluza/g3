@@ -526,6 +526,21 @@ pub fn as_tls_interception_client_config_builder(
                 builder.set_mirror_client_hello(enable);
                 Ok(())
             }
+            "mirror_strict" => {
+                let enable = crate::value::as_bool(v)?;
+                builder.set_mirror_strict(enable);
+                Ok(())
+            }
+            "mirror_calibration_host" => {
+                let host = crate::value::as_string(v)?;
+                builder.set_mirror_calibration_host(host);
+                Ok(())
+            }
+            "mirror_calibrated_file" => {
+                let path = crate::value::as_string(v)?;
+                builder.set_mirror_calibrated_file(std::path::PathBuf::from(path));
+                Ok(())
+            }
             "insecure" => {
                 let enable = crate::value::as_bool(v)?;
                 builder.set_insecure(enable);
@@ -1365,6 +1380,26 @@ mod tests {
         let builder = as_tls_interception_client_config_builder(&yaml[0], None).unwrap();
         let mut expected = OpensslInterceptionClientConfigBuilder::default();
         expected.set_mirror_client_hello(true);
+        assert_eq!(builder, expected);
+    }
+
+    #[test]
+    fn as_tls_interception_client_config_builder_mirror_strict() {
+        let yaml = YamlLoader::load_from_str(
+            r#"
+                mirror_client_hello: true
+                mirror_strict: true
+                mirror_calibration_host: "fp.example.net"
+                mirror_calibrated_file: "/shared/g3proxy-calibrated"
+            "#,
+        )
+        .unwrap();
+        let builder = as_tls_interception_client_config_builder(&yaml[0], None).unwrap();
+        let mut expected = OpensslInterceptionClientConfigBuilder::default();
+        expected.set_mirror_client_hello(true);
+        expected.set_mirror_strict(true);
+        expected.set_mirror_calibration_host("fp.example.net".to_string());
+        expected.set_mirror_calibrated_file(std::path::PathBuf::from("/shared/g3proxy-calibrated"));
         assert_eq!(builder, expected);
     }
 

@@ -687,6 +687,48 @@ The keys are:
 
   **default**: false
 
+  What the h2 interception (``upstream_profile: mirror``) learns about a client is kept per
+  client: its browser build, by a hash of the ClientHello (cipher suites, extensions, signature
+  algorithms, groups; not the parts that differ between its connections), and its proxy user if
+  it authenticates. The profile holds the HTTP/2 SETTINGS for ALPS and the request framing
+  (pseudo header order, HEADERS priority) for its h2 connections without a request yet.
+
+* mirror_strict
+
+  **optional**, **type**: bool
+
+  Strict mirroring: rather than send anything the client didn't, fail the connection. Then
+  a ClientHello that can't be parsed, an error while copying it, a value or an extension that
+  can't be copied, a fallback to a static value and a GREASE use different from
+  ``enable_grease`` all fail the upstream connection, and so does, in the h2 interception, a
+  first flight that can't be copied in full. Clients reach hosts other than
+  ``mirror_calibration_host`` only once calibrated: an h2 connection with a request has shown
+  their SETTINGS and request framing, so that ALPS and preconnects carry theirs instead of
+  Chrome's. Rejected connections are logged as warnings with the identity of the pod
+  (``SESSION_ID``, ``BOT_ID``, ``POD_NAME``, ``NODE_NAME`` from the environment).
+
+  Needs ``mirror_client_hello`` and ``mirror_calibration_host``. Only supported for BoringSSL.
+
+  **default**: false
+
+* mirror_calibration_host
+
+  **optional**, **type**: str
+
+  Host of the calibration site: open to clients not calibrated yet, so that they can show
+  their h2 profile there first. Its h2 connections are learned from and not checked strictly.
+
+  **default**: not set
+
+* mirror_calibrated_file
+
+  **optional**, **type**: str
+
+  File to append the key of each newly calibrated client to, one per line, as a readiness
+  signal for the browser, e.g. on a volume shared with it.
+
+  **default**: not set
+
 * insecure:
 
   **optional**, **type**: bool

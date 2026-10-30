@@ -7,31 +7,8 @@
 
 use thiserror::Error;
 
-/// A request pseudo-header
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum H2PseudoHeader {
-    Method,
-    Scheme,
-    Authority,
-    Path,
-}
-
-/// Stream dependency of a HEADERS frame with the PRIORITY flag
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct H2HeadersPriority {
-    pub exclusive: bool,
-    pub dependency: u32,
-    /// 1 to 256
-    pub weight: u16,
-}
-
-/// What the first request HEADERS frame tells about the client
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct H2FirstHeaders {
-    pub priority: Option<H2HeadersPriority>,
-    /// Pseudo-headers in wire order
-    pub pseudo_order: Vec<H2PseudoHeader>,
-}
+// defined in g3-types, where the interception client keeps them per client profile
+pub use g3_types::net::{H2FirstHeaders, H2HeadersPriority, H2PseudoHeader};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum H2PrefaceParseError {

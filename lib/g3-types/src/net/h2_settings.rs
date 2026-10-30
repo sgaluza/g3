@@ -2,6 +2,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/// A request pseudo-header
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum H2PseudoHeader {
+    Method,
+    Scheme,
+    Authority,
+    Path,
+}
+
+/// Stream dependency of a HEADERS frame with the PRIORITY flag
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct H2HeadersPriority {
+    pub exclusive: bool,
+    pub dependency: u32,
+    /// 1 to 256
+    pub weight: u16,
+}
+
+/// What the first request HEADERS frame of a client tells about it
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct H2FirstHeaders {
+    pub priority: Option<H2HeadersPriority>,
+    /// Pseudo-headers in wire order
+    pub pseudo_order: Vec<H2PseudoHeader>,
+}
+
 /// HTTP/2 connection settings Chrome sends, as one source for every place that
 /// must look like Chrome: the h2 client of the interception and ALPS in TLS.
 pub struct ChromeH2Settings;

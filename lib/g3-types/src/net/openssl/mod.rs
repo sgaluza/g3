@@ -5,8 +5,9 @@
 
 mod client;
 pub use client::{
-    BrowserClientHello, MirrorReport, OpensslClientConfig, OpensslClientConfigBuilder,
-    OpensslInterceptionClientConfig, OpensslInterceptionClientConfigBuilder,
+    BrowserClientHello, ClientProfile, ClientProfileKey, LearnedH2, MirrorReport,
+    OpensslClientConfig, OpensslClientConfigBuilder, OpensslInterceptionClientConfig,
+    OpensslInterceptionClientConfigBuilder,
 };
 
 mod server;
