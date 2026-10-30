@@ -5,9 +5,11 @@
 //! Calibration of the client profile for strict mirroring: who this g3proxy
 //! serves (for log events) and the readiness file for the browser
 
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 use std::sync::OnceLock;
+
+use tokio::io::AsyncWriteExt;
 
 /// Environment variables naming what this g3proxy serves, with their log names
 const IDENTITY_VARS: [(&str, &str); 4] = [
@@ -37,13 +39,16 @@ pub(super) fn identity() -> &'static str {
     IDENTITY.get_or_init(|| identity_from(|name| std::env::var(name).ok()))
 }
 
-/// Append the key of a newly calibrated client to the readiness file
-pub(super) fn mark_calibrated(path: &Path, client: &str) -> io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
+/// Append the key of a newly calibrated client to the readiness file, in one
+/// write so concurrent calibrations don't interleave
+pub(super) async fn mark_calibrated(path: &Path, client: &str) -> io::Result<()> {
+    let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)?;
-    writeln!(file, "{client}")
+        .open(path)
+        .await?;
+    file.write_all(format!("{client}\n").as_bytes()).await?;
+    file.flush().await
 }
 
 #[cfg(test)]
@@ -79,15 +84,16 @@ mod tests {
         assert_eq!(identity_from(vars(&[])), "-");
     }
 
-    #[test]
-    fn calibrated_clients_are_appended() {
+    /// Written off the async worker threads: the file may be on a slow shared volume
+    #[tokio::test]
+    async fn calibrated_clients_are_appended() {
         let dir = std::env::temp_dir().join(format!("g3proxy-calib-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("calibrated");
         let _ = std::fs::remove_file(&path);
 
-        mark_calibrated(&path, "0123456789ab").unwrap();
-        mark_calibrated(&path, "ba9876543210@bot-1").unwrap();
+        mark_calibrated(&path, "0123456789ab").await.unwrap();
+        mark_calibrated(&path, "ba9876543210@bot-1").await.unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "0123456789ab\nba9876543210@bot-1\n");
 

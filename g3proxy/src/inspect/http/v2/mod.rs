@@ -39,6 +39,10 @@ mod preface;
 /// SETTINGS, WINDOW_UPDATE and a request HEADERS take
 const MAX_CLIENT_PREFACE_SIZE: usize = 64 * 1024;
 
+/// How long to wait after SETTINGS for the first request of a client whose
+/// request framing is not learned yet; a preconnect sends none
+const REQUEST_WAIT: Duration = Duration::from_millis(500);
+
 mod error;
 pub(crate) use error::{H2InterceptionError, H2StreamTransferError};
 
@@ -359,7 +363,7 @@ where
         // strict mirroring fails what can't be copied, but on the calibration
         // site, where the profile of the client is being learned
         let calibration_host =
-            tls_client.is_some_and(|c| c.is_calibration_host(&self.upstream.host().to_string()));
+            tls_client.is_some_and(|c| c.is_calibration_upstream(self.upstream.host()));
         let strict = mirror && tls_client.is_some_and(|c| c.mirror_strict()) && !calibration_host;
         let learned_request = match (tls_client, &self.client_profile) {
             (Some(c), Some(client)) => c.client_profile(client).and_then(|p| p.request),
@@ -375,7 +379,11 @@ where
         let (clt_r, client_preface) = if mirror {
             match tokio::time::timeout(
                 http_config.client_handshake_timeout,
-                preface::read_client_preface(clt_r, MAX_CLIENT_PREFACE_SIZE, wait_request),
+                preface::read_client_preface(
+                    clt_r,
+                    MAX_CLIENT_PREFACE_SIZE,
+                    wait_request.then_some(REQUEST_WAIT),
+                ),
             )
             .await
             {
@@ -407,7 +415,7 @@ where
                     calibration::identity()
                 );
                 if let Some(path) = c.mirror_calibrated_file() {
-                    if let Err(e) = calibration::mark_calibrated(path, &client.to_string()) {
+                    if let Err(e) = calibration::mark_calibrated(path, &client.to_string()).await {
                         warn!("failed to write calibrated file {}: {e}", path.display());
                     }
                 }

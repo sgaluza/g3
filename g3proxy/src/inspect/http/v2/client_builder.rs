@@ -49,16 +49,16 @@ impl H2MirrorReport {
         *self == H2MirrorReport::default()
     }
 
-    /// Worth a warning: anything but a first flight without a request, which
-    /// Chrome preconnects send all the time and which gets Chrome framing, and
-    /// no first flight at all, from a client that closes or fails the h2
-    /// handshake anyway
     /// Why a strict mirror can't use this connection: anything not copied from
     /// the client, a first flight without a request included
     pub(super) fn strict_error(&self) -> Option<String> {
         (!self.is_empty()).then(|| format!("h2 not copied from the client: {self}"))
     }
 
+    /// Worth a warning: anything but a first flight without a request, which
+    /// Chrome preconnects send all the time and which gets Chrome framing, and
+    /// no first flight at all, from a client that closes or fails the h2
+    /// handshake anyway
     pub(super) fn is_notable(&self) -> bool {
         !H2MirrorReport {
             no_request: false,

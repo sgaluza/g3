@@ -20,7 +20,7 @@ use super::{
     BrowserClientHello, ClientProfile, ClientProfileKey, DEFAULT_HANDSHAKE_TIMEOUT, LearnedH2,
     MINIMAL_HANDSHAKE_TIMEOUT, MirrorReport, OpensslClientSessionCache, OpensslSessionCacheConfig,
 };
-use crate::net::{H2FirstHeaders, TlsAlpn, TlsServerName, TlsVersion, UpstreamAddr};
+use crate::net::{H2FirstHeaders, Host, TlsAlpn, TlsServerName, TlsVersion, UpstreamAddr};
 
 /// Static per-connection BoringSSL settings: set on each Ssl rather than the
 /// SslContext, so that a mirrored ClientHello can leave them out
@@ -268,6 +268,15 @@ impl OpensslInterceptionClientConfig {
     #[cfg(not(boringssl))]
     pub fn is_calibration_host(&self, _host: &str) -> bool {
         false
+    }
+
+    /// Same as `is_calibration_host` for an upstream host, without a String:
+    /// the calibration host is a domain, an IP never matches
+    pub fn is_calibration_upstream(&self, host: &Host) -> bool {
+        match host {
+            Host::Domain(domain) => self.is_calibration_host(domain),
+            Host::Ip(_) => false,
+        }
     }
 
     /// Readiness file for newly calibrated clients, if set
@@ -2296,6 +2305,19 @@ mod tests {
             config.mirror_calibrated_file(),
             Some(Path::new("/shared/g3proxy-calibrated"))
         );
+    }
+
+    /// The upstream host compares without a string per connection
+    #[test]
+    #[cfg(boringssl)]
+    fn calibration_host_matches_upstream_host() {
+        use crate::net::Host;
+
+        let config = strict_config();
+        assert!(config.is_calibration_upstream(&Host::Domain("calibrate.test".into())));
+        assert!(config.is_calibration_upstream(&Host::Domain("CALIBRATE.test".into())));
+        assert!(!config.is_calibration_upstream(&Host::Domain("www.example.com".into())));
+        assert!(!config.is_calibration_upstream(&Host::Ip("127.0.0.1".parse().unwrap())));
     }
 
     /// Strict mode with nothing to mirror or no way to calibrate is a broken config

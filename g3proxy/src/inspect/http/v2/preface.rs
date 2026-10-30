@@ -2,8 +2,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::time::Duration;
+
 use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::time::Instant;
 
 use g3_dpi::parser::h2::H2ClientPreface;
 use g3_io_ext::OnceBufReader;
@@ -16,13 +19,15 @@ const READ_CHUNK: usize = 16 * 1024;
 /// reader for the h2 server. `None` if the stream is not an h2 preface, ends
 /// early, fails or reaches `max_size` before the SETTINGS frame is complete;
 /// the h2 server then reports the error itself.
-/// With `wait_request` it reads on until the first request HEADERS too, as
-/// Chrome may send it in a later TLS record than SETTINGS: for learning the
-/// request framing of a client.
+/// With `request_wait` it reads on for at most that long after SETTINGS for
+/// the first request HEADERS too, as Chrome may send it in a later TLS record
+/// than SETTINGS: for learning the request framing of a client. A preconnect
+/// holds the connection open without a request: then SETTINGS alone are
+/// returned when the wait is over.
 pub(super) async fn read_client_preface<R>(
     clt_r: OnceBufReader<R>,
     max_size: usize,
-    wait_request: bool,
+    request_wait: Option<Duration>,
 ) -> (OnceBufReader<R>, Option<H2ClientPreface>)
 where
     R: AsyncRead + Unpin,
@@ -31,12 +36,19 @@ where
     let mut data = buf.map(|b| BytesMut::from(&b[..])).unwrap_or_default();
     // SETTINGS already parsed, kept if the request never comes
     let mut parsed = None;
+    // set once SETTINGS are parsed: no reads for the request after it
+    let mut wait_deadline: Option<Instant> = None;
     loop {
         match H2ClientPreface::parse(&data) {
-            Ok(Some(preface)) if !wait_request || preface.headers.is_some() => {
+            Ok(Some(preface)) if request_wait.is_none() || preface.headers.is_some() => {
                 return (OnceBufReader::new(inner, data), Some(preface));
             }
-            Ok(Some(preface)) => parsed = Some(preface),
+            Ok(Some(preface)) => {
+                parsed = Some(preface);
+                if wait_deadline.is_none() {
+                    wait_deadline = request_wait.map(|wait| Instant::now() + wait);
+                }
+            }
             Ok(None) => {}
             Err(_) => return (OnceBufReader::new(inner, data), None),
         }
@@ -47,7 +59,17 @@ where
         // reserved one read takes all that already came, the request included
         let limit = max_size - data.len();
         data.reserve(limit.min(READ_CHUNK));
-        match (&mut inner).take(limit as u64).read_buf(&mut data).await {
+        let mut limited = (&mut inner).take(limit as u64);
+        let read = limited.read_buf(&mut data);
+        let read = match wait_deadline {
+            // a read cut by the deadline consumed nothing: read_buf is cancel safe
+            Some(deadline) => match tokio::time::timeout_at(deadline, read).await {
+                Ok(r) => r,
+                Err(_) => return (OnceBufReader::new(inner, data), parsed),
+            },
+            None => read.await,
+        };
+        match read {
             Ok(n) if n > 0 => {}
             _ => return (OnceBufReader::new(inner, data), parsed),
         }
@@ -66,6 +88,7 @@ mod tests {
         "/../lib/g3-dpi/tests/fixtures/chrome156-h2-first-flight.bin"
     ));
     const MAX_SIZE: usize = 64 * 1024;
+    const REQUEST_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
     /// Everything the h2 server would read from the returned reader
     async fn replayed(mut r: OnceBufReader<DuplexStream>) -> Vec<u8> {
@@ -87,7 +110,7 @@ mod tests {
     async fn parses_chrome_first_flight_and_replays_it() {
         // protocol detection read the preface and a part of SETTINGS
         let r = reader(&CHROME_156[..30], &CHROME_156[30..]).await;
-        let (r, preface) = read_client_preface(r, MAX_SIZE, false).await;
+        let (r, preface) = read_client_preface(r, MAX_SIZE, None).await;
 
         let preface = preface.expect("Chrome first flight");
         assert_eq!(preface.window_update, Some(15663105));
@@ -105,7 +128,7 @@ mod tests {
 
         let (mut r, preface) = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            read_client_preface(r, MAX_SIZE, false),
+            read_client_preface(r, MAX_SIZE, None),
         )
         .await
         .expect("no wait after SETTINGS");
@@ -123,7 +146,7 @@ mod tests {
     #[tokio::test]
     async fn not_h2_is_left_to_the_server() {
         let data = b"GET / HTTP/1.1\r\nHost: a\r\n\r\n";
-        let (r, preface) = read_client_preface(reader(b"", data).await, MAX_SIZE, false).await;
+        let (r, preface) = read_client_preface(reader(b"", data).await, MAX_SIZE, None).await;
 
         assert_eq!(preface, None);
         assert_eq!(replayed(r).await, data);
@@ -132,7 +155,7 @@ mod tests {
     #[tokio::test]
     async fn early_end_is_left_to_the_server() {
         let data = &CHROME_156[..40];
-        let (r, preface) = read_client_preface(reader(b"", data).await, MAX_SIZE, false).await;
+        let (r, preface) = read_client_preface(reader(b"", data).await, MAX_SIZE, None).await;
 
         assert_eq!(preface, None);
         assert_eq!(replayed(r).await, data);
@@ -140,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn too_large_is_left_to_the_server() {
-        let (r, preface) = read_client_preface(reader(b"", CHROME_156).await, 30, false).await;
+        let (r, preface) = read_client_preface(reader(b"", CHROME_156).await, 30, None).await;
 
         assert_eq!(preface, None);
         assert_eq!(replayed(r).await, CHROME_156);
@@ -160,7 +183,7 @@ mod tests {
 
         let (r, preface) = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            read_client_preface(OnceBufReader::with_no_buf(r), MAX_SIZE, true),
+            read_client_preface(OnceBufReader::with_no_buf(r), MAX_SIZE, Some(REQUEST_WAIT)),
         )
         .await
         .expect("the request comes in 100ms");
@@ -168,12 +191,44 @@ mod tests {
         assert_eq!(replayed(r).await, CHROME_156);
     }
 
+    /// A preconnect keeps the connection open without a request: the wait for
+    /// it is short, then the first flight is used without one
+    #[tokio::test]
+    async fn preconnect_held_open_ends_the_request_wait() {
+        let (mut w, r) = tokio::io::duplex(MAX_SIZE);
+        let settings_end = 24 + 9 + 24;
+        w.write_all(&CHROME_156[..settings_end]).await.unwrap();
+
+        let started = std::time::Instant::now();
+        let (mut r, preface) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_client_preface(
+                OnceBufReader::with_no_buf(r),
+                MAX_SIZE,
+                Some(std::time::Duration::from_millis(200)),
+            ),
+        )
+        .await
+        .expect("no hang until the handshake timeout");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let preface = preface.expect("SETTINGS came");
+        assert_eq!(preface.headers, None);
+
+        // what comes later still reaches the h2 server
+        w.write_all(&CHROME_156[settings_end..]).await.unwrap();
+        drop(w);
+        let mut out = Vec::new();
+        r.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out, CHROME_156);
+    }
+
     /// A client that ends after SETTINGS still has its SETTINGS learned
     #[tokio::test]
     async fn waiting_for_the_request_keeps_settings_on_end() {
         let settings_end = 24 + 9 + 24;
         let data = &CHROME_156[..settings_end];
-        let (r, preface) = read_client_preface(reader(b"", data).await, MAX_SIZE, true).await;
+        let (r, preface) =
+            read_client_preface(reader(b"", data).await, MAX_SIZE, Some(REQUEST_WAIT)).await;
 
         let preface = preface.expect("SETTINGS came");
         assert_eq!(preface.settings.len(), 4);

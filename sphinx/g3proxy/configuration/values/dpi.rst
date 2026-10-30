@@ -692,6 +692,9 @@ The keys are:
   algorithms, groups; not the parts that differ between its connections), and its proxy user if
   it authenticates. The profile holds the HTTP/2 SETTINGS for ALPS and the request framing
   (pseudo header order, HEADERS priority) for its h2 connections without a request yet.
+  Profiles of the 64 clients seen last are kept: with more clients at a time, the least
+  recently seen one loses its profile, and with ``mirror_strict`` its next connections fail
+  until it calibrates again.
 
 * mirror_strict
 
