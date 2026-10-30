@@ -361,6 +361,14 @@ mod tests {
         let config = as_h2_interception_config(&yaml).unwrap();
         assert_eq!(config.upstream_profile, g3_dpi::H2UpstreamProfile::Chrome);
 
+        let yaml = yaml_doc!(
+            r"
+                upstream_profile: mirror
+            "
+        );
+        let config = as_h2_interception_config(&yaml).unwrap();
+        assert_eq!(config.upstream_profile, g3_dpi::H2UpstreamProfile::Mirror);
+
         // value clamping
         let yaml = yaml_doc!(
             r"

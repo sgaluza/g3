@@ -613,6 +613,8 @@ The keys are:
 
   Send the ALPS (application_settings, new codepoint) extension with Chrome's HTTP/2 SETTINGS
   if h2 is in the ALPN list offered to the upstream server, which is taken from the client.
+  With the h2 interception ``upstream_profile: mirror`` the SETTINGS last seen from the client
+  are sent instead, once there are some.
 
   Only supported for BoringSSL.
 
@@ -658,7 +660,8 @@ The keys are:
   - TLS 1.2 cipher suites, in client order (TLS 1.3 cipher suites are fixed in BoringSSL)
   - supported_groups and the groups of key_share
   - signature_algorithms
-  - ALPS protocols and codepoint, with Chrome's HTTP/2 SETTINGS for h2
+  - ALPS protocols and codepoint, with Chrome's HTTP/2 SETTINGS for h2 (with the h2
+    interception ``upstream_profile: mirror``, the SETTINGS last seen from the client)
   - GREASE ECH if the client sends encrypted_client_hello (real ECH can't be copied)
   - trust_anchors
   - status_request and signed_certificate_timestamp
@@ -823,6 +826,22 @@ The keys are:
     The values of `max_header_list_size`, `max_frame_size`, `stream_window_size` and
     `connection_window_size` are not used for the upstream connection then, but still
     apply to the h2 connection with the client.
+  - mirror: the same as the client. Before the upstream h2 handshake the first flight of
+    the client is read up to the end of its first SETTINGS frame, without waiting for more,
+    and the upstream connection sends the same SETTINGS (those the h2 client supports, in
+    ascending id order), connection window update, pseudo header order and HEADERS
+    priority. If the first flight has no request yet (a Chrome preconnect), the pseudo
+    header order and priority of the chrome profile are used; without a first flight at
+    all, the whole chrome profile. PRIORITY frames of the client are not copied. What
+    could not be copied is logged as a warning for the connection. Reading the first flight
+    and the h2 handshake with the client share one ``client_handshake_timeout``.
+
+    The SETTINGS the upstream connection sends are also remembered for the ALPS of later upstream
+    TLS connections (see ``mirror_client_hello`` and ``enable_alps`` of
+    :ref:`tls interception client <conf_value_dpi_tls_interception_client>`). The TLS
+    handshake with the upstream comes before the client SETTINGS, so the first connection
+    after the client changed them still sends the previous ones (Chrome's at start), which
+    is logged as a warning.
 
   Use it together with the browser-like settings of
   :ref:`tls interception client <conf_value_dpi_tls_interception_client>`, so that the
