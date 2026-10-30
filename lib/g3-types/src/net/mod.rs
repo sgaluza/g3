@@ -42,7 +42,7 @@ pub use buf::SocketBufferConfig;
 pub use dns::*;
 pub use egress::{EgressArea, EgressInfo};
 pub use error::ConnectError;
-pub use h2_settings::ChromeH2Settings;
+pub use h2_settings::{ChromeH2Settings, H2FirstHeaders, H2HeadersPriority, H2PseudoHeader};
 pub use haproxy::{
     ProxyProtocolEncodeError, ProxyProtocolEncoder, ProxyProtocolV2Encoder, ProxyProtocolVersion,
 };

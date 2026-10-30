@@ -26,6 +26,9 @@ use crate::net::{Host, TlsAlpn, TlsServerName, TlsVersion, UpstreamAddr};
 mod browser_hello;
 pub use browser_hello::{BrowserClientHello, MirrorReport};
 
+mod profile;
+pub use profile::{ClientProfile, ClientProfileKey, LearnedH2};
+
 #[cfg(boringssl)]
 mod mirror;
 

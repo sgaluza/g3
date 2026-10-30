@@ -22,7 +22,7 @@ use g3_dpi::{Protocol, ProtocolInspector};
 use g3_io_ext::{AsyncStream, FlexBufReader, OnceBufReader};
 use g3_slog_types::{LtUpstreamAddr, LtUuid, LtX509VerifyResult};
 use g3_types::net::{
-    AlpnProtocol, BrowserClientHello, OpensslInterceptionClientConfig,
+    AlpnProtocol, BrowserClientHello, ClientProfileKey, OpensslInterceptionClientConfig,
     OpensslInterceptionServerConfig, TlsAlpn, TlsServerName, UpstreamAddr,
 };
 use g3_udpdump::{
@@ -47,12 +47,13 @@ pub(super) struct ParsedClientHello {
     pub(super) version: RawVersion,
     pub(super) sni: Option<TlsServerName>,
     pub(super) alpn: Option<TlsAlpn>,
-    /// Set if `mirror_client_hello` is enabled and the ClientHello could be parsed for it
+    /// Set if the client config parses the browser ClientHello (mirror or
+    /// ALPS) and it could be parsed: for the mirror and the client profile
     pub(super) browser: Option<BrowserClientHello>,
 }
 
 impl ParsedClientHello {
-    pub(super) fn parse(ch: ClientHello<'_>, mirror: bool) -> anyhow::Result<Self> {
+    pub(super) fn parse(ch: ClientHello<'_>, parse_browser: bool) -> anyhow::Result<Self> {
         let mut sni: Option<TlsServerName> = None;
         let mut alpn: Option<TlsAlpn> = None;
 
@@ -77,12 +78,13 @@ impl ParsedClientHello {
             }
         }
 
-        // a ClientHello the mirror can't parse still goes upstream, with the static one
-        let browser = if mirror {
+        // a ClientHello that can't be parsed still goes upstream: with the static
+        // one instead of a mirror, and without a client profile
+        let browser = if parse_browser {
             BrowserClientHello::parse(ch.cipher_suites, ch.extensions)
                 .inspect_err(|e| {
                     let sni = sni.as_ref().map(|n| n.as_ref()).unwrap_or("-");
-                    warn!("can't mirror ClientHello for SNI {sni}, using the static one: {e}");
+                    warn!("can't parse browser ClientHello for SNI {sni}: {e}");
                 })
                 .ok()
         } else {
@@ -144,10 +146,9 @@ impl TlsInterceptionContext {
         })
     }
 
-    /// Send these client HTTP/2 SETTINGS in the ALPS of the next upstream
-    /// connections, true if they differ from what ALPS carried so far
-    pub(crate) fn remember_h2_settings(&self, payload: &[u8]) -> bool {
-        self.client_config.remember_h2_settings(payload)
+    /// Upstream TLS client config: mirroring, strict mode, client profiles
+    pub(crate) fn client_config(&self) -> &OpensslInterceptionClientConfig {
+        &self.client_config
     }
 
     pub(super) fn get_stream_dumper(&self, worker_id: Option<usize>) -> Option<&StreamDumper> {
@@ -199,7 +200,7 @@ impl TlsInterceptionContext {
         let mut handshake_coalescer =
             HandshakeCoalescer::new(self.server_config.client_hello_max_size);
         let mut record_offset = 0;
-        let mirror = self.client_config.mirror_client_hello();
+        let parse_browser = self.client_config.parses_client_hello();
 
         loop {
             let mut record = match Record::parse(&clt_r_buf[record_offset..]) {
@@ -230,10 +231,10 @@ impl TlsInterceptionContext {
                     let ch = handshake_msg
                         .parse_client_hello()
                         .map_err(|_| anyhow!("invalid tls client hello request"))?;
-                    return ParsedClientHello::parse(ch, mirror);
+                    return ParsedClientHello::parse(ch, parse_browser);
                 }
                 Ok(None) => match handshake_coalescer.parse_client_hello() {
-                    Ok(Some(ch)) => return ParsedClientHello::parse(ch, mirror),
+                    Ok(Some(ch)) => return ParsedClientHello::parse(ch, parse_browser),
                     Ok(None) => {
                         if !record.consume_done() {
                             return Err(anyhow!("partial fragmented tls client hello request"));
@@ -265,6 +266,8 @@ pub(crate) struct TlsInterceptObject<SC: ServerConfig> {
     upstream: UpstreamAddr,
     tls_interception: TlsInterceptionContext,
     server_verify_result: Option<X509VerifyResult>,
+    /// Client profile of this connection, passed on to the h2 interception
+    client_profile: Option<ClientProfileKey>,
 }
 
 macro_rules! intercept_log {
@@ -293,6 +296,7 @@ impl<SC: ServerConfig> TlsInterceptObject<SC> {
             upstream,
             tls_interception: tls,
             server_verify_result: None,
+            client_profile: None,
         }
     }
 
@@ -494,6 +498,7 @@ where
             Protocol::Http2 => {
                 let mut h2_obj =
                     crate::inspect::http::H2InterceptObject::new(ctx, self.upstream.clone());
+                h2_obj.set_client_profile(self.client_profile.clone());
                 h2_obj.set_io(
                     OnceBufReader::with_no_buf(Box::new(clt_r)),
                     Box::new(clt_w),

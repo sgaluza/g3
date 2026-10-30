@@ -11,7 +11,7 @@ use yaml_rust::{Yaml, yaml};
 
 use g3_cert_agent::CertAgentConfig;
 use g3_dpi::{
-    H1InterceptionConfig, H2InterceptionConfig, ImapInterceptionConfig,
+    H1InterceptionConfig, H2InterceptionConfig, H2UpstreamProfile, ImapInterceptionConfig,
     ProtocolInspectPolicyBuilder, ProtocolInspectionConfig, ProtocolPortMap,
     SmtpInterceptionConfig,
 };
@@ -111,6 +111,10 @@ impl AuditorConfig {
         if self.name.is_empty() {
             return Err(anyhow!("name is not set"));
         }
+        check_mirror_strict_h2(
+            self.tls_interception_client.mirror_strict(),
+            self.h2_interception.upstream_profile,
+        )?;
 
         Ok(())
     }
@@ -254,5 +258,36 @@ impl AuditorConfig {
             }
             _ => Err(anyhow!("invalid key {k}")),
         }
+    }
+}
+
+/// Strict mirroring calibrates clients only in the h2 interception with the
+/// mirror profile: without it no client ever calibrates, and all hosts but
+/// the calibration one are refused
+fn check_mirror_strict_h2(
+    mirror_strict: bool,
+    h2_upstream_profile: H2UpstreamProfile,
+) -> anyhow::Result<()> {
+    if mirror_strict && h2_upstream_profile != H2UpstreamProfile::Mirror {
+        return Err(anyhow!(
+            "tls_interception_client.mirror_strict needs h2_interception with \
+             upstream_profile: mirror, or no client can calibrate"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_mirror_needs_h2_mirror_profile() {
+        let e = check_mirror_strict_h2(true, H2UpstreamProfile::Default)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("upstream_profile: mirror"), "{e}");
+        check_mirror_strict_h2(true, H2UpstreamProfile::Mirror).unwrap();
+        check_mirror_strict_h2(false, H2UpstreamProfile::Default).unwrap();
     }
 }

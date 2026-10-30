@@ -12,11 +12,11 @@ use openssl::ssl::Ssl;
 use g3_dpi::{Protocol, ProtocolInspector};
 use g3_io_ext::OnceBufReader;
 use g3_openssl::{SslAcceptor, SslConnector};
-use g3_types::net::{AlpnProtocol, Host, TlsCertUsage, TlsServiceType};
+use g3_types::net::{AlpnProtocol, ClientProfileKey, Host, TlsCertUsage, TlsServiceType};
 
 use super::{ParsedClientHello, TlsInterceptIo, TlsInterceptObject, TlsInterceptionError};
 use crate::config::server::ServerConfig;
-use crate::inspect::StreamInspection;
+use crate::inspect::{StreamInspection, calibration};
 
 #[cfg(not(feature = "vendored-tongsuo"))]
 const CERT_USAGE: TlsCertUsage = TlsCertUsage::TlsServer;
@@ -72,6 +72,12 @@ where
                     ))
                 })?,
             None => {
+                // the client: its browser build and proxy user, for the learned profile
+                let username = self.ctx.task_notes.raw_username().cloned();
+                self.client_profile = client_hello
+                    .browser
+                    .as_ref()
+                    .map(|b| ClientProfileKey::new(b, username.as_deref()));
                 let (ssl, report) = self
                     .tls_interception
                     .client_config
@@ -80,8 +86,16 @@ where
                         &self.upstream,
                         alpn_ext.as_ref(),
                         client_hello.browser.as_ref(),
+                        self.client_profile.as_ref(),
                     )
                     .map_err(|e| {
+                        if self.tls_interception.client_config.mirror_strict() {
+                            warn!(
+                                "strict mirror refused {} for {}: {e}",
+                                self.upstream,
+                                calibration::identity()
+                            );
+                        }
                         TlsInterceptionError::UpstreamPrepareFailed(anyhow!(
                             "failed to build general ssl context: {e}"
                         ))

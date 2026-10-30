@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use async_recursion::async_recursion;
 use bytes::Bytes;
 use h2::{Reason, server::Connection};
-use log::{debug, warn};
+use log::{debug, info, warn};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::oneshot;
 
@@ -19,7 +19,7 @@ use g3_dpi::{H2UpstreamProfile, Protocol, ProtocolInspectAction};
 use g3_h2::H2BodyTransfer;
 use g3_io_ext::{IdleInterval, OnceBufReader, StreamCopyConfig};
 use g3_slog_types::{LtUpstreamAddr, LtUuid};
-use g3_types::net::UpstreamAddr;
+use g3_types::net::{ClientProfileKey, UpstreamAddr};
 
 #[cfg(feature = "quic")]
 use crate::audit::DetourAction;
@@ -27,6 +27,7 @@ use crate::auth::User;
 use crate::config::server::ServerConfig;
 use crate::inspect::{
     BoxAsyncRead, BoxAsyncWrite, InterceptionError, StreamInspectContext, StreamTransitTask,
+    calibration,
 };
 use crate::log::task::TaskEvent;
 use crate::serve::ServerTaskResult;
@@ -82,6 +83,8 @@ pub(crate) struct H2InterceptObject<SC: ServerConfig> {
     ctx: StreamInspectContext<SC>,
     stats: Arc<H2ConcurrencyStats>,
     upstream: UpstreamAddr,
+    /// Client profile from the TLS interception, for learning and strict mirroring
+    client_profile: Option<ClientProfileKey>,
 }
 
 impl<SC: ServerConfig> H2InterceptObject<SC> {
@@ -92,7 +95,12 @@ impl<SC: ServerConfig> H2InterceptObject<SC> {
             ctx,
             stats,
             upstream,
+            client_profile: None,
         }
+    }
+
+    pub(crate) fn set_client_profile(&mut self, client: Option<ClientProfileKey>) {
+        self.client_profile = client;
     }
 
     pub(crate) fn set_io(
@@ -335,6 +343,17 @@ where
         Err(H2InterceptionError::ClientConnectionBlocked)
     }
 
+    /// A strict mirror refusal of this h2 connection: every one is logged with
+    /// the identity of the pod, the task log alone doesn't have it
+    fn strict_refusal(&self, reason: String) -> H2InterceptionError {
+        warn!(
+            "strict mirror refused h2 to {} for {}: {reason}",
+            self.upstream,
+            calibration::identity()
+        );
+        H2InterceptionError::MirrorStrict(reason)
+    }
+
     #[async_recursion]
     async fn do_intercept(&mut self) -> Result<(), H2InterceptionError> {
         let H2InterceptIo {
@@ -345,13 +364,35 @@ where
         } = self.io.take().unwrap();
 
         let http_config = self.ctx.h2_interception();
+        let mirror = http_config.upstream_profile == H2UpstreamProfile::Mirror;
+        let tls = self.ctx.tls_interception();
+        let tls_client = tls.as_ref().map(|t| t.client_config());
+        // strict mirroring fails what can't be copied, but on the calibration
+        // site, where the profile of the client is being learned
+        let calibration_host =
+            tls_client.is_some_and(|c| c.is_calibration_upstream(self.upstream.host()));
+        let mirror_strict = mirror && tls_client.is_some_and(|c| c.mirror_strict());
+        let strict = mirror_strict && !calibration_host;
+        let learned_request = match (tls_client, &self.client_profile) {
+            (Some(c), Some(client)) => c.client_profile(client).and_then(|p| p.request),
+            _ => None,
+        };
+        // until the request framing of the client is known, wait for its first
+        // request too: Chrome may send it in a later TLS record than SETTINGS.
+        // The calibration host is strict too here: it is where framing is learned.
+        let request_wait = preface::request_wait(
+            mirror_strict,
+            self.client_profile.is_some(),
+            learned_request.is_some(),
+        );
+
         // the mirror profile needs the client first flight before the upstream handshake;
         // it takes from the same client handshake timeout as the h2 handshake below
         let preface_started = Instant::now();
-        let (clt_r, client_preface) = if http_config.upstream_profile == H2UpstreamProfile::Mirror {
+        let (clt_r, client_preface) = if mirror {
             match tokio::time::timeout(
                 http_config.client_handshake_timeout,
-                preface::read_client_preface(clt_r, MAX_CLIENT_PREFACE_SIZE),
+                preface::read_client_preface(clt_r, MAX_CLIENT_PREFACE_SIZE, request_wait),
             )
             .await
             {
@@ -365,20 +406,51 @@ where
             http_config.client_handshake_timeout,
             preface_started.elapsed(),
         );
-        if let (Some(p), Some(tls)) = (&client_preface, self.ctx.tls_interception()) {
+
+        if let (Some(p), Some(c), Some(client)) =
+            (&client_preface, tls_client, &self.client_profile)
+        {
             // the TLS of this connection is done already: its ALPS had the old SETTINGS.
             // ALPS gets the SETTINGS the upstream connection really sends.
-            if tls.remember_h2_settings(&client_builder::mirror_alps_settings(p)) {
+            let learned = c.learn_h2(
+                client,
+                &client_builder::mirror_alps_settings(p),
+                p.headers.as_ref(),
+            );
+            if learned.newly_calibrated {
+                info!(
+                    "client {client} calibrated on {} for {}",
+                    self.upstream,
+                    calibration::identity()
+                );
+                if let Some(path) = c.mirror_calibrated_file() {
+                    calibration::spawn_mark_calibrated(path.to_path_buf(), client.to_string());
+                }
+            }
+            if learned.settings_changed {
+                if strict {
+                    return Err(self.strict_refusal(format!(
+                        "h2 SETTINGS of client {client} differ from the ALPS sent"
+                    )));
+                }
                 warn!(
-                    "h2 SETTINGS of the client changed, ALPS to {} had other ones; \
+                    "h2 SETTINGS of client {client} changed, ALPS to {} had other ones; \
                      next connections send the new ones",
                     self.upstream
                 );
             }
         }
 
-        let (client_builder, report) =
-            client_builder::upstream_client_builder(http_config, client_preface.as_ref());
+        let (client_builder, report) = client_builder::upstream_client_builder(
+            http_config,
+            client_preface.as_ref(),
+            learned_request.as_ref(),
+        );
+        if strict {
+            if let Some(e) = report.strict_error() {
+                return Err(self.strict_refusal(e));
+            }
+        }
         if report.is_notable() {
             warn!("h2 to {} differs from the client: {report}", self.upstream);
         } else if !report.is_empty() {

@@ -14,6 +14,18 @@ const EXT_SUPPORTED_GROUPS: u16 = 0x000a;
 const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000d;
 const EXT_SIGNED_CERT_TIMESTAMP: u16 = 0x0012;
 pub(super) const EXT_PRE_SHARED_KEY: u16 = 0x0029;
+
+/// Extensions that differ between connections of one browser build
+const PER_CONNECTION_EXTENSIONS: [u16; 7] = [
+    0x0000, // server_name, absent for IP hosts
+    0x0010, // ALPN
+    0x0015, // padding
+    EXT_PRE_SHARED_KEY,
+    0x002a, // early_data
+    EXT_ALPS_OLD,
+    EXT_ALPS_NEW,
+];
+
 const EXT_KEY_SHARE: u16 = 0x0033;
 const EXT_ALPS_OLD: u16 = 0x4469;
 const EXT_ALPS_NEW: u16 = 0x44cd;
@@ -71,6 +83,44 @@ impl BrowserClientHello {
     /// The browser resumes a session of its own (sends pre_shared_key)
     pub fn resumes_session(&self) -> bool {
         self.extensions.contains(&EXT_PRE_SHARED_KEY)
+    }
+
+    /// Short key of the browser build, the same for all its connections: a hash
+    /// of cipher suites and extension types (sorted, as Chrome permutes them),
+    /// signature algorithms and groups (in order). Extensions that depend on the
+    /// connection are left out: server_name, ALPN, ALPS (only with h2 in ALPN),
+    /// padding, pre_shared_key and early_data.
+    pub fn profile_key(&self) -> String {
+        /// Bytes of the sha256 in the key: 12 hex characters
+        const PROFILE_KEY_BYTES: usize = 6;
+
+        let mut suites = self.cipher_suites.clone();
+        suites.sort_unstable();
+        let mut extensions: Vec<u16> = self
+            .extensions
+            .iter()
+            .copied()
+            .filter(|t| !PER_CONNECTION_EXTENSIONS.contains(t))
+            .collect();
+        extensions.sort_unstable();
+
+        let mut canonical = Vec::new();
+        for (tag, list) in [
+            (b'c', &suites),
+            (b'e', &extensions),
+            (b's', &self.signature_algorithms),
+            (b'g', &self.groups),
+        ] {
+            canonical.push(tag);
+            canonical.extend_from_slice(&(list.len() as u16).to_be_bytes());
+            for v in list {
+                canonical.extend_from_slice(&v.to_be_bytes());
+            }
+        }
+        openssl::sha::sha256(&canonical)[..PROFILE_KEY_BYTES]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     /// Parse from the cipher_suites body and the extensions body (both without

@@ -3,8 +3,8 @@
  * Copyright 2023-2025 ByteDance and/or its affiliates.
  */
 
-#[cfg(boringssl)]
-use std::sync::{Arc, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -15,11 +15,12 @@ use openssl::x509::store::X509StoreBuilder;
 
 #[cfg(boringssl)]
 use super::mirror;
+use super::profile::{CLIENT_PROFILES_CAPACITY, ClientProfiles};
 use super::{
-    BrowserClientHello, DEFAULT_HANDSHAKE_TIMEOUT, MINIMAL_HANDSHAKE_TIMEOUT, MirrorReport,
-    OpensslClientSessionCache, OpensslSessionCacheConfig,
+    BrowserClientHello, ClientProfile, ClientProfileKey, DEFAULT_HANDSHAKE_TIMEOUT, LearnedH2,
+    MINIMAL_HANDSHAKE_TIMEOUT, MirrorReport, OpensslClientSessionCache, OpensslSessionCacheConfig,
 };
-use crate::net::{TlsAlpn, TlsServerName, TlsVersion, UpstreamAddr};
+use crate::net::{H2FirstHeaders, Host, TlsAlpn, TlsServerName, TlsVersion, UpstreamAddr};
 
 /// Static per-connection BoringSSL settings: set on each Ssl rather than the
 /// SslContext, so that a mirrored ClientHello can leave them out
@@ -33,20 +34,8 @@ struct StaticHello {
     enable_alps: bool,
     trust_anchor_ids: Option<Vec<u8>>,
     mirror_client_hello: bool,
-    /// SETTINGS payload last seen from the client by the h2 interception, sent in
-    /// the ALPS of the next connections; shared by all clones of the config
-    h2_settings: Arc<RwLock<Option<Vec<u8>>>>,
-}
-
-#[cfg(boringssl)]
-impl StaticHello {
-    /// SETTINGS payload for ALPS: the remembered one of the client, or Chrome's
-    fn h2_settings(&self) -> Vec<u8> {
-        let learned = self.h2_settings.read().unwrap_or_else(|e| e.into_inner());
-        learned
-            .clone()
-            .unwrap_or_else(|| mirror::CHROME_H2_ALPS_SETTINGS.to_vec())
-    }
+    mirror_strict: bool,
+    mirror_calibration_host: Option<String>,
 }
 
 #[derive(Clone)]
@@ -59,9 +48,14 @@ struct ContextPair {
 
 impl ContextPair {
     /// Static per-connection options: OCSP, SCT, trust anchors, GREASE ECH
-    /// and ALPS for h2 (new codepoint, as current Chrome does)
+    /// and ALPS for h2 (new codepoint, as current Chrome does) with `h2_settings`
     #[cfg(boringssl)]
-    fn set_static_hello(&self, ssl: &mut Ssl, alpn_ext: Option<&TlsAlpn>) -> anyhow::Result<()> {
+    fn set_static_hello(
+        &self,
+        ssl: &mut Ssl,
+        alpn_ext: Option<&TlsAlpn>,
+        h2_settings: &[u8],
+    ) -> anyhow::Result<()> {
         let hello = &self.hello;
         if hello.use_ocsp_stapling {
             mirror::enable_ocsp_stapling(ssl);
@@ -77,39 +71,48 @@ impl ContextPair {
         }
         let offers_h2 = alpn_ext.is_some_and(|alpn| alpn.contains(b"h2"));
         if hello.enable_alps && offers_h2 {
-            mirror::add_application_settings(ssl, b"h2", true, &hello.h2_settings())?;
+            mirror::add_application_settings(ssl, b"h2", true, h2_settings)?;
         }
         Ok(())
     }
 
+    /// Ssl with the static ClientHello, Chrome's SETTINGS in ALPS
     pub fn build_ssl(
         &self,
         server_name: Option<&TlsServerName>,
         upstream: &UpstreamAddr,
         alpn_ext: Option<&TlsAlpn>,
     ) -> anyhow::Result<Ssl> {
-        self.build_static_ssl(server_name, upstream, alpn_ext, true)
+        #[cfg(boringssl)]
+        return self.build_static_ssl(
+            server_name,
+            upstream,
+            alpn_ext,
+            true,
+            &mirror::CHROME_H2_ALPS_SETTINGS,
+        );
+        #[cfg(not(boringssl))]
+        self.new_ssl(server_name, upstream, alpn_ext, true)
     }
 
-    /// Ssl with the static ClientHello; a cached session is only resumed if `resume`
+    /// Ssl with the static ClientHello and `h2_settings` in ALPS; a cached
+    /// session is only resumed if `resume`
+    #[cfg(boringssl)]
     fn build_static_ssl(
         &self,
         server_name: Option<&TlsServerName>,
         upstream: &UpstreamAddr,
         alpn_ext: Option<&TlsAlpn>,
         resume: bool,
+        h2_settings: &[u8],
     ) -> anyhow::Result<Ssl> {
-        let ssl = self.new_ssl(server_name, upstream, alpn_ext, resume)?;
-        #[cfg(boringssl)]
-        let ssl = {
-            let mut ssl = ssl;
-            self.set_static_hello(&mut ssl, alpn_ext)?;
-            ssl
-        };
+        let mut ssl = self.new_ssl(server_name, upstream, alpn_ext, resume)?;
+        self.set_static_hello(&mut ssl, alpn_ext, h2_settings)?;
         Ok(ssl)
     }
 
-    /// Ssl copying the browser ClientHello, see `mirror::apply_browser_hello`
+    /// Ssl copying the browser ClientHello, see `mirror::apply_browser_hello`,
+    /// with `h2_settings` in ALPS
     #[cfg(boringssl)]
     fn build_mirror_ssl(
         &self,
@@ -117,6 +120,7 @@ impl ContextPair {
         upstream: &UpstreamAddr,
         alpn_ext: Option<&TlsAlpn>,
         browser: &BrowserClientHello,
+        h2_settings: &[u8],
     ) -> anyhow::Result<(Ssl, MirrorReport)> {
         let mut ssl = self.new_ssl(server_name, upstream, alpn_ext, false)?;
         let report = mirror::apply_browser_hello(
@@ -124,7 +128,7 @@ impl ContextPair {
             alpn_ext,
             browser,
             self.hello.enable_grease,
-            &self.hello.h2_settings(),
+            h2_settings,
         )?;
         // resume a cached upstream session only if the browser resumes its own,
         // a fresh browser with a resumed upstream session is not like a browser.
@@ -173,6 +177,20 @@ impl ContextPair {
     }
 }
 
+/// Strict mirroring: the mirrored Ssl only if the browser ClientHello was
+/// copied in full, an error with what differs otherwise
+#[cfg(boringssl)]
+fn strict_mirror(mirror: anyhow::Result<(Ssl, MirrorReport)>) -> anyhow::Result<Ssl> {
+    let (ssl, report) = mirror.map_err(|e| anyhow!("strict mirror: {e}"))?;
+    if report.is_empty() {
+        Ok(ssl)
+    } else {
+        Err(anyhow!(
+            "strict mirror: ClientHello not copied in full: {report}"
+        ))
+    }
+}
+
 /// Keep the mirrored Ssl, or if copying the browser ClientHello failed, use a
 /// fresh static one (the failed Ssl may be half configured) and report why
 #[cfg(boringssl)]
@@ -199,6 +217,9 @@ pub struct OpensslInterceptionClientConfig {
     tlcp_context_pair: ContextPair,
     pub insecure: bool,
     pub handshake_timeout: Duration,
+    /// Learned client profiles, shared by all clones of the config
+    profiles: Arc<ClientProfiles>,
+    calibrated_file: Option<PathBuf>,
 }
 
 impl OpensslInterceptionClientConfig {
@@ -223,29 +244,129 @@ impl OpensslInterceptionClientConfig {
         false
     }
 
-    /// Remember the HTTP/2 SETTINGS payload of the client, to send it in the ALPS
-    /// of the next upstream connections instead of Chrome's. Returns whether the
-    /// ALPS payload changed, so connections opened before had other SETTINGS.
+    /// Whether the browser ClientHello is parsed: for the mirror, and for the
+    /// client profile, whose learned SETTINGS the ALPS sends
     #[cfg(boringssl)]
-    pub fn remember_h2_settings(&self, payload: &[u8]) -> bool {
+    pub fn parses_client_hello(&self) -> bool {
         let hello = &self.ssl_context_pair.hello;
-        if hello.h2_settings() == payload {
-            return false;
-        }
-        let mut learned = hello.h2_settings.write().unwrap_or_else(|e| e.into_inner());
-        *learned = Some(payload.to_vec());
-        true
+        hello.mirror_client_hello || hello.enable_alps
     }
 
-    /// ALPS is only sent with BoringSSL
     #[cfg(not(boringssl))]
-    pub fn remember_h2_settings(&self, _payload: &[u8]) -> bool {
+    pub fn parses_client_hello(&self) -> bool {
         false
+    }
+
+    /// Strict mirroring: a connection that can't copy the client fails
+    #[cfg(boringssl)]
+    pub fn mirror_strict(&self) -> bool {
+        self.ssl_context_pair.hello.mirror_strict
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn mirror_strict(&self) -> bool {
+        false
+    }
+
+    /// The host is the calibration site, open to clients not calibrated yet
+    #[cfg(boringssl)]
+    pub fn is_calibration_host(&self, host: &str) -> bool {
+        self.ssl_context_pair
+            .hello
+            .mirror_calibration_host
+            .as_deref()
+            .is_some_and(|h| h.eq_ignore_ascii_case(host))
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn is_calibration_host(&self, _host: &str) -> bool {
+        false
+    }
+
+    /// Same as `is_calibration_host` for an upstream host, without a String:
+    /// the calibration host is a domain, an IP never matches
+    pub fn is_calibration_upstream(&self, host: &Host) -> bool {
+        match host {
+            Host::Domain(domain) => self.is_calibration_host(domain),
+            Host::Ip(_) => false,
+        }
+    }
+
+    /// Readiness file for newly calibrated clients, if set
+    pub fn mirror_calibrated_file(&self) -> Option<&Path> {
+        self.calibrated_file.as_deref()
+    }
+
+    /// What was learned about the client so far
+    pub fn client_profile(&self, client: &ClientProfileKey) -> Option<ClientProfile> {
+        self.profiles.get(client)
+    }
+
+    /// Learn from an h2 connection of the client: the SETTINGS the upstream
+    /// connection sends (ALPS of its next connections) and its request framing
+    pub fn learn_h2(
+        &self,
+        client: &ClientProfileKey,
+        settings: &[u8],
+        request: Option<&H2FirstHeaders>,
+    ) -> LearnedH2 {
+        self.profiles.learn_h2(client, settings, request)
+    }
+
+    /// SETTINGS payload for the ALPS of the client: learned, or Chrome's
+    #[cfg(boringssl)]
+    fn alps_settings(profile: Option<&ClientProfile>) -> Vec<u8> {
+        profile
+            .and_then(|p| p.h2_settings.clone())
+            .unwrap_or_else(|| mirror::CHROME_H2_ALPS_SETTINGS.to_vec())
+    }
+
+    /// Strict mirroring: a full copy of the browser ClientHello or an error.
+    /// Only calibrated clients reach hosts other than the calibration site.
+    /// `profile` is what is learned about `client`, looked up once by the caller.
+    #[cfg(boringssl)]
+    fn build_strict_ssl(
+        &self,
+        server_name: Option<&TlsServerName>,
+        upstream: &UpstreamAddr,
+        alpn_ext: Option<&TlsAlpn>,
+        browser: Option<&BrowserClientHello>,
+        client: Option<&ClientProfileKey>,
+        profile: Option<&ClientProfile>,
+    ) -> anyhow::Result<Ssl> {
+        let browser = browser
+            .ok_or_else(|| anyhow!("strict mirror: the client ClientHello was not parsed"))?;
+        let calibration_host = match server_name {
+            Some(name) => self.is_calibration_host(name.as_ref()),
+            None => self.is_calibration_upstream(upstream.host()),
+        };
+        let calibrated = profile.is_some_and(|p| p.calibrated);
+        if !calibrated && !calibration_host {
+            // strings only for the error, not on every handshake
+            let host = match server_name {
+                Some(name) => name.as_ref().to_string(),
+                None => upstream.host().to_string(),
+            };
+            let client = client
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            return Err(anyhow!(
+                "strict mirror: client {client} not calibrated, {host} is not the calibration host"
+            ));
+        }
+        strict_mirror(self.ssl_context_pair.build_mirror_ssl(
+            server_name,
+            upstream,
+            alpn_ext,
+            browser,
+            &Self::alps_settings(profile),
+        ))
     }
 
     /// Like `build_ssl`; with `mirror_client_hello` enabled and a browser
     /// ClientHello given, the upstream ClientHello copies the browser one and
-    /// the report tells what could not be copied
+    /// the report tells what could not be copied. `client` selects the learned
+    /// profile (ALPS SETTINGS, calibration).
     #[cfg(boringssl)]
     pub fn build_mirror_ssl(
         &self,
@@ -253,26 +374,37 @@ impl OpensslInterceptionClientConfig {
         upstream: &UpstreamAddr,
         alpn_ext: Option<&TlsAlpn>,
         browser: Option<&BrowserClientHello>,
+        client: Option<&ClientProfileKey>,
     ) -> anyhow::Result<(Ssl, MirrorReport)> {
+        let pair = &self.ssl_context_pair;
+        // one lookup per handshake: the profiles are shared by all connections
+        let profile = client.and_then(|c| self.profiles.get(c));
         if !self.mirror_client_hello() {
-            let ssl = self.build_ssl(server_name, upstream, alpn_ext)?;
+            let alps = Self::alps_settings(profile.as_ref());
+            let ssl = pair.build_static_ssl(server_name, upstream, alpn_ext, true, &alps)?;
             return Ok((ssl, MirrorReport::default()));
         }
+        if self.mirror_strict() {
+            let ssl = self.build_strict_ssl(
+                server_name,
+                upstream,
+                alpn_ext,
+                browser,
+                client,
+                profile.as_ref(),
+            )?;
+            return Ok((ssl, MirrorReport::default()));
+        }
+        let alps = Self::alps_settings(profile.as_ref());
         match browser {
             Some(b) => mirror_or_static(
-                self.ssl_context_pair
-                    .build_mirror_ssl(server_name, upstream, alpn_ext, b),
-                || self.static_fallback_ssl(server_name, upstream, alpn_ext, b),
+                pair.build_mirror_ssl(server_name, upstream, alpn_ext, b, &alps),
+                || self.static_fallback_ssl(server_name, upstream, alpn_ext, b, &alps),
             ),
             // the ClientHello couldn't be parsed, so it's unknown whether the client
             // resumes a session: don't resume the upstream one either
             None => {
-                let ssl = self.ssl_context_pair.build_static_ssl(
-                    server_name,
-                    upstream,
-                    alpn_ext,
-                    false,
-                )?;
+                let ssl = pair.build_static_ssl(server_name, upstream, alpn_ext, false, &alps)?;
                 Ok((ssl, MirrorReport::default()))
             }
         }
@@ -287,12 +419,14 @@ impl OpensslInterceptionClientConfig {
         upstream: &UpstreamAddr,
         alpn_ext: Option<&TlsAlpn>,
         browser: &BrowserClientHello,
+        h2_settings: &[u8],
     ) -> anyhow::Result<Ssl> {
         self.ssl_context_pair.build_static_ssl(
             server_name,
             upstream,
             alpn_ext,
             browser.resumes_session(),
+            h2_settings,
         )
     }
 
@@ -303,6 +437,7 @@ impl OpensslInterceptionClientConfig {
         upstream: &UpstreamAddr,
         alpn_ext: Option<&TlsAlpn>,
         _browser: Option<&BrowserClientHello>,
+        _client: Option<&ClientProfileKey>,
     ) -> anyhow::Result<(Ssl, MirrorReport)> {
         let ssl = self.build_ssl(server_name, upstream, alpn_ext)?;
         Ok((ssl, MirrorReport::default()))
@@ -347,6 +482,11 @@ pub struct OpensslInterceptionClientConfigBuilder {
     trust_anchor_ids: Option<Vec<u8>>,
     #[cfg(boringssl)]
     mirror_client_hello: bool,
+    #[cfg(boringssl)]
+    mirror_strict: bool,
+    #[cfg(boringssl)]
+    mirror_calibration_host: Option<String>,
+    mirror_calibrated_file: Option<PathBuf>,
     insecure: bool,
 }
 
@@ -378,6 +518,11 @@ impl Default for OpensslInterceptionClientConfigBuilder {
             trust_anchor_ids: None,
             #[cfg(boringssl)]
             mirror_client_hello: false,
+            #[cfg(boringssl)]
+            mirror_strict: false,
+            #[cfg(boringssl)]
+            mirror_calibration_host: None,
+            mirror_calibrated_file: None,
             insecure: false,
         }
     }
@@ -391,7 +536,26 @@ impl OpensslInterceptionClientConfigBuilder {
 
         #[cfg(boringssl)]
         self.check_signature_algorithms_and_trust_anchors()?;
+        #[cfg(boringssl)]
+        self.check_mirror_strict()?;
 
+        Ok(())
+    }
+
+    /// Strict mirroring needs something to mirror and a way for clients to calibrate
+    #[cfg(boringssl)]
+    fn check_mirror_strict(&self) -> anyhow::Result<()> {
+        if !self.mirror_strict {
+            return Ok(());
+        }
+        if !self.mirror_client_hello {
+            return Err(anyhow!("mirror_strict needs mirror_client_hello"));
+        }
+        if self.mirror_calibration_host.is_none() {
+            return Err(anyhow!(
+                "mirror_strict needs mirror_calibration_host, or no client can calibrate"
+            ));
+        }
         Ok(())
     }
 
@@ -560,6 +724,48 @@ impl OpensslInterceptionClientConfigBuilder {
     #[cfg(not(boringssl))]
     pub fn set_mirror_client_hello(&mut self, _enable: bool) {
         warn!("ClientHello mirroring can only be set for BoringSSL");
+    }
+
+    /// Strict mirroring: fail a connection that can't copy the client instead
+    /// of sending static values, and keep clients not calibrated yet away from
+    /// all hosts but the calibration one
+    #[cfg(boringssl)]
+    pub fn set_mirror_strict(&mut self, enable: bool) {
+        self.mirror_strict = enable;
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn set_mirror_strict(&mut self, _enable: bool) {
+        warn!("strict ClientHello mirroring can only be set for BoringSSL");
+    }
+
+    /// Strict mirroring is set: for checks against other parts of the config
+    #[cfg(boringssl)]
+    pub fn mirror_strict(&self) -> bool {
+        self.mirror_strict
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn mirror_strict(&self) -> bool {
+        false
+    }
+
+    /// The calibration site: clients go there first, so that their h2 profile
+    /// is learned before they reach real sites in strict mode
+    #[cfg(boringssl)]
+    pub fn set_mirror_calibration_host(&mut self, host: String) {
+        self.mirror_calibration_host = Some(host);
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn set_mirror_calibration_host(&mut self, _host: String) {
+        warn!("the mirror calibration host can only be set for BoringSSL");
+    }
+
+    /// File the h2 interception appends the key of each newly calibrated client
+    /// to, as a readiness signal for the browser (e.g. on a volume it shares)
+    pub fn set_mirror_calibrated_file(&mut self, path: PathBuf) {
+        self.mirror_calibrated_file = Some(path);
     }
 
     pub fn set_insecure(&mut self, enable: bool) {
@@ -735,7 +941,8 @@ impl OpensslInterceptionClientConfigBuilder {
                 enable_alps: self.enable_alps,
                 trust_anchor_ids: self.trust_anchor_ids.clone(),
                 mirror_client_hello: self.mirror_client_hello,
-                h2_settings: Arc::new(RwLock::new(None)),
+                mirror_strict: self.mirror_strict,
+                mirror_calibration_host: self.mirror_calibration_host.clone(),
             },
         })
     }
@@ -868,6 +1075,8 @@ impl OpensslInterceptionClientConfigBuilder {
             tlcp_context_pair: self.build_tlcp_context()?,
             insecure: self.insecure,
             handshake_timeout: self.handshake_timeout,
+            profiles: Arc::new(ClientProfiles::new(CLIENT_PROFILES_CAPACITY)),
+            calibrated_file: self.mirror_calibrated_file.clone(),
         })
     }
 }
@@ -1208,7 +1417,13 @@ mod tests {
         let alpn = TlsAlpn::from_extension_value(&wired).unwrap();
 
         let (ssl, report) = config
-            .build_mirror_ssl(server_name.as_ref(), &upstream, Some(&alpn), browser)
+            .build_mirror_ssl(
+                server_name.as_ref(),
+                &upstream,
+                Some(&alpn),
+                browser,
+                browser.map(|b| ClientProfileKey::new(b, None)).as_ref(),
+            )
             .unwrap();
         (capture_ssl(ssl), report)
     }
@@ -1809,14 +2024,14 @@ mod tests {
 
         let fresh = browser_hello(CHROME_156_CLIENT_HELLO);
         let ssl = config
-            .static_fallback_ssl(None, &test_upstream(), None, &fresh)
+            .static_fallback_ssl(None, &test_upstream(), None, &fresh, &[])
             .unwrap();
         assert!(!browser_hello(&capture_ssl(ssl)).resumes_session());
 
         let mut resuming = fresh.clone();
         resuming.extensions.push(EXT_PRE_SHARED_KEY);
         let ssl = config
-            .static_fallback_ssl(None, &test_upstream(), None, &resuming)
+            .static_fallback_ssl(None, &test_upstream(), None, &resuming, &[])
             .unwrap();
         assert!(browser_hello(&capture_ssl(ssl)).resumes_session());
     }
@@ -1978,19 +2193,42 @@ mod tests {
         TlsAlpn::from_extension_value(b"\x00\x03\x02h2").unwrap()
     }
 
-    /// The ALPS of later upstream connections carries the SETTINGS the h2
-    /// interception last saw from the client, Chrome's before that
+    /// Request framing seen from a client: Firefox-like order, no priority
+    #[cfg(boringssl)]
+    fn request_framing() -> H2FirstHeaders {
+        use crate::net::H2PseudoHeader::*;
+
+        H2FirstHeaders {
+            priority: None,
+            pseudo_order: vec![Method, Path, Authority, Scheme],
+        }
+    }
+
+    /// Build with `build_mirror_ssl` for the Chrome 156 fixture as that client
+    #[cfg(boringssl)]
+    fn build_for(
+        config: &OpensslInterceptionClientConfig,
+        host: &str,
+        browser: Option<&BrowserClientHello>,
+        client: Option<&ClientProfileKey>,
+    ) -> anyhow::Result<(Ssl, MirrorReport)> {
+        let upstream = UpstreamAddr::from_host_str_and_port(host, 443).unwrap();
+        config.build_mirror_ssl(None, &upstream, Some(&h2_alpn()), browser, client)
+    }
+
+    /// The static ClientHello (mirror off) takes the ALPS SETTINGS from the
+    /// client profile too, Chrome's before anything is learned
     #[test]
     #[cfg(boringssl)]
-    fn static_alps_uses_remembered_h2_settings() {
+    fn static_alps_uses_settings_of_the_client() {
         let mut builder = chrome_like_builder();
         builder.set_insecure(true);
         let config = builder.build().unwrap();
-        let alpn = h2_alpn();
+        let browser = browser_hello(CHROME_156_CLIENT_HELLO);
+        let client = ClientProfileKey::new(&browser, None);
 
-        let ssl = config
-            .build_ssl(None, &test_upstream(), Some(&alpn))
-            .unwrap();
+        let (ssl, _) =
+            build_for(&config, "www.example.com", Some(&browser), Some(&client)).unwrap();
         assert_eq!(
             server_sees_alps(ssl),
             crate::net::ChromeH2Settings::settings_payload()
@@ -1998,28 +2236,275 @@ mod tests {
 
         // Chrome's SETTINGS are what ALPS had already, the others change it
         let chrome = crate::net::ChromeH2Settings::settings_payload();
-        assert!(!config.remember_h2_settings(&chrome));
-        assert!(config.remember_h2_settings(&OTHER_H2_SETTINGS));
-        assert!(!config.remember_h2_settings(&OTHER_H2_SETTINGS));
-        let ssl = config
-            .build_ssl(None, &test_upstream(), Some(&alpn))
-            .unwrap();
+        assert!(!config.learn_h2(&client, &chrome, None).settings_changed);
+        assert!(
+            config
+                .learn_h2(&client, &OTHER_H2_SETTINGS, None)
+                .settings_changed
+        );
+        assert!(
+            !config
+                .learn_h2(&client, &OTHER_H2_SETTINGS, None)
+                .settings_changed
+        );
+        let (ssl, _) =
+            build_for(&config, "www.example.com", Some(&browser), Some(&client)).unwrap();
         assert_eq!(server_sees_alps(ssl), OTHER_H2_SETTINGS);
     }
 
     #[test]
     #[cfg(boringssl)]
-    fn mirror_alps_uses_remembered_h2_settings() {
+    fn mirror_alps_uses_settings_of_the_client() {
         let mut builder = mirror_builder();
         builder.set_insecure(true);
         let config = builder.build().unwrap();
-        let alpn = h2_alpn();
         let browser = browser_hello(CHROME_156_CLIENT_HELLO);
+        let client = ClientProfileKey::new(&browser, None);
 
-        config.remember_h2_settings(&OTHER_H2_SETTINGS);
-        let (ssl, _) = config
-            .build_mirror_ssl(None, &test_upstream(), Some(&alpn), Some(&browser))
-            .unwrap();
+        config.learn_h2(&client, &OTHER_H2_SETTINGS, None);
+        let (ssl, _) =
+            build_for(&config, "www.example.com", Some(&browser), Some(&client)).unwrap();
         assert_eq!(server_sees_alps(ssl), OTHER_H2_SETTINGS);
+
+        // another client (proxy user) has its own profile: Chrome's for now
+        let other = ClientProfileKey::new(&browser, Some("bot-2"));
+        let (ssl, _) = build_for(&config, "www.example.com", Some(&browser), Some(&other)).unwrap();
+        assert_eq!(
+            server_sees_alps(ssl),
+            crate::net::ChromeH2Settings::settings_payload()
+        );
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn profile_key_is_the_same_for_one_browser() {
+        let chrome = browser_hello(CHROME_156_CLIENT_HELLO);
+        let key = chrome.profile_key();
+        assert_eq!(key.len(), 12);
+        assert!(key.bytes().all(|b| b.is_ascii_hexdigit()), "{key}");
+
+        // per connection: resumption, padding, ALPN and ALPS (absent without h2)
+        let mut other_connection = chrome.clone();
+        other_connection.extensions.push(EXT_PRE_SHARED_KEY);
+        other_connection.extensions.push(0x0015);
+        other_connection
+            .extensions
+            .retain(|t| ![0x0010, EXT_ALPS_NEW_CODEPOINT].contains(t));
+        other_connection.alps_protocols.clear();
+        assert_eq!(other_connection.profile_key(), key);
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn profile_key_differs_between_browser_builds() {
+        let chrome = browser_hello(CHROME_156_CLIENT_HELLO);
+        // Chrome 150 has no trust_anchors
+        let mut chrome_150 = chrome.clone();
+        chrome_150.extensions.retain(|t| *t != EXT_TRUST_ANCHORS);
+        chrome_150.trust_anchors = None;
+        assert_ne!(chrome_150.profile_key(), chrome.profile_key());
+
+        // a different signature algorithm order is a different build
+        let mut reordered = chrome.clone();
+        reordered.signature_algorithms.reverse();
+        assert_ne!(reordered.profile_key(), chrome.profile_key());
+
+        // the proxy user is a part of the client key
+        assert_ne!(
+            ClientProfileKey::new(&chrome, Some("bot-1")),
+            ClientProfileKey::new(&chrome, Some("bot-2"))
+        );
+    }
+
+    /// Strict mirroring with a calibration site
+    #[cfg(boringssl)]
+    fn strict_builder() -> OpensslInterceptionClientConfigBuilder {
+        let mut builder = mirror_builder();
+        builder.set_insecure(true);
+        builder.set_mirror_strict(true);
+        builder.set_mirror_calibration_host("calibrate.test".to_string());
+        builder.set_mirror_calibrated_file(PathBuf::from("/shared/g3proxy-calibrated"));
+        builder
+    }
+
+    #[cfg(boringssl)]
+    fn strict_config() -> OpensslInterceptionClientConfig {
+        strict_builder().build().unwrap()
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn strict_flags_reach_config() {
+        let config = strict_config();
+        assert!(config.mirror_strict());
+        assert!(config.is_calibration_host("calibrate.test"));
+        assert!(!config.is_calibration_host("www.example.com"));
+        assert_eq!(
+            config.mirror_calibrated_file(),
+            Some(Path::new("/shared/g3proxy-calibrated"))
+        );
+    }
+
+    /// The upstream host compares without a string per connection
+    #[test]
+    #[cfg(boringssl)]
+    fn calibration_host_matches_upstream_host() {
+        use crate::net::Host;
+
+        let config = strict_config();
+        assert!(config.is_calibration_upstream(&Host::Domain("calibrate.test".into())));
+        assert!(config.is_calibration_upstream(&Host::Domain("CALIBRATE.test".into())));
+        assert!(!config.is_calibration_upstream(&Host::Domain("www.example.com".into())));
+        assert!(!config.is_calibration_upstream(&Host::Ip("127.0.0.1".parse().unwrap())));
+    }
+
+    /// Strict mode with nothing to mirror or no way to calibrate is a broken config
+    #[test]
+    #[cfg(boringssl)]
+    fn check_rejects_strict_without_mirror_or_calibration_host() {
+        let mut builder = OpensslInterceptionClientConfigBuilder::default();
+        builder.set_mirror_strict(true);
+        builder.set_mirror_calibration_host("calibrate.test".to_string());
+        let e = builder.check().unwrap_err().to_string();
+        assert!(e.contains("mirror_client_hello"), "{e}");
+
+        let mut builder = OpensslInterceptionClientConfigBuilder::default();
+        builder.set_mirror_client_hello(true);
+        builder.set_mirror_strict(true);
+        let e = builder.check().unwrap_err().to_string();
+        assert!(e.contains("mirror_calibration_host"), "{e}");
+
+        strict_builder().check().unwrap();
+    }
+
+    /// ALPS without the mirror still learns the client SETTINGS: the client
+    /// profile needs the parsed ClientHello
+    #[test]
+    #[cfg(boringssl)]
+    fn client_hello_parsed_for_mirror_or_alps() {
+        let build = |mirror: bool, alps: bool| {
+            let mut builder = OpensslInterceptionClientConfigBuilder::default();
+            builder.set_mirror_client_hello(mirror);
+            builder.set_enable_alps(alps);
+            builder.build().unwrap()
+        };
+        assert!(!build(false, false).parses_client_hello());
+        assert!(build(true, false).parses_client_hello());
+        assert!(build(false, true).parses_client_hello());
+    }
+
+    /// The auditor checks strict mode against its h2 interception
+    #[test]
+    #[cfg(boringssl)]
+    fn builder_tells_strict_mode() {
+        assert!(!OpensslInterceptionClientConfigBuilder::default().mirror_strict());
+        assert!(strict_builder().mirror_strict());
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn strict_needs_the_client_hello() {
+        let e = build_for(&strict_config(), "calibrate.test", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("ClientHello"), "{e}");
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn strict_keeps_clients_not_calibrated_off_real_sites() {
+        let config = strict_config();
+        let browser = browser_hello(CHROME_156_CLIENT_HELLO);
+        let client = ClientProfileKey::new(&browser, None);
+
+        let e = build_for(&config, "www.example.com", Some(&browser), Some(&client))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not calibrated"), "{e}");
+
+        // the calibration site is open, with Chrome's SETTINGS in ALPS for now
+        let (ssl, report) =
+            build_for(&config, "calibrate.test", Some(&browser), Some(&client)).unwrap();
+        assert!(report.is_empty(), "{report}");
+        assert_eq!(
+            server_sees_alps(ssl),
+            crate::net::ChromeH2Settings::settings_payload()
+        );
+
+        // SETTINGS alone (a preconnect) don't calibrate
+        config.learn_h2(&client, &OTHER_H2_SETTINGS, None);
+        assert!(build_for(&config, "www.example.com", Some(&browser), Some(&client)).is_err());
+
+        // a request completes the profile: real sites get the learned ALPS
+        let learned = config.learn_h2(&client, &OTHER_H2_SETTINGS, Some(&request_framing()));
+        assert!(learned.newly_calibrated);
+        let (ssl, _) =
+            build_for(&config, "www.example.com", Some(&browser), Some(&client)).unwrap();
+        assert_eq!(server_sees_alps(ssl), OTHER_H2_SETTINGS);
+        assert!(config.client_profile(&client).unwrap().calibrated);
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn strict_calibration_is_per_client() {
+        let config = strict_config();
+        let browser = browser_hello(CHROME_156_CLIENT_HELLO);
+        let first = ClientProfileKey::new(&browser, Some("bot-1"));
+        let second = ClientProfileKey::new(&browser, Some("bot-2"));
+        config.learn_h2(&first, &OTHER_H2_SETTINGS, Some(&request_framing()));
+
+        assert!(build_for(&config, "www.example.com", Some(&browser), Some(&first)).is_ok());
+        assert!(build_for(&config, "www.example.com", Some(&browser), Some(&second)).is_err());
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn strict_fails_what_it_cannot_copy() {
+        let config = strict_config();
+        let mut browser = browser_hello(CHROME_156_CLIENT_HELLO);
+        let client = ClientProfileKey::new(&browser, None);
+        config.learn_h2(&client, &OTHER_H2_SETTINGS, Some(&request_framing()));
+
+        // an unknown cipher would be dropped: that's another fingerprint
+        browser.cipher_suites.push(0xfe01);
+        let e = build_for(&config, "www.example.com", Some(&browser), Some(&client))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("fe01"), "{e}");
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn strict_mirror_takes_only_a_full_copy() {
+        let config = strict_config();
+        let ssl = || config.build_ssl(None, &test_upstream(), None).unwrap();
+
+        assert!(strict_mirror(Ok((ssl(), MirrorReport::default()))).is_ok());
+
+        let e = strict_mirror(Err(anyhow!("copy failed")))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("copy failed"), "{e}");
+
+        let report = MirrorReport {
+            grease_mismatch: true,
+            ..Default::default()
+        };
+        let e = strict_mirror(Ok((ssl(), report))).unwrap_err().to_string();
+        assert!(e.contains("GREASE"), "{e}");
+    }
+
+    #[test]
+    #[cfg(boringssl)]
+    fn not_strict_keeps_static_fallback() {
+        // without strict mode nothing changes: no calibration needed
+        let mut builder = mirror_builder();
+        builder.set_insecure(true);
+        let config = builder.build().unwrap();
+        let browser = browser_hello(CHROME_156_CLIENT_HELLO);
+        let client = ClientProfileKey::new(&browser, None);
+        assert!(!config.mirror_strict());
+        assert!(build_for(&config, "www.example.com", Some(&browser), Some(&client)).is_ok());
+        assert!(build_for(&config, "www.example.com", None, None).is_ok());
     }
 }

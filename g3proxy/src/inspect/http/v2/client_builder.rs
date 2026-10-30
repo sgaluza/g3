@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use h2::client::PseudoHeader;
 
-use g3_dpi::parser::h2::{H2ClientPreface, H2PseudoHeader};
+use g3_dpi::parser::h2::{H2ClientPreface, H2FirstHeaders, H2PseudoHeader};
 use g3_dpi::{H2InterceptionConfig, H2UpstreamProfile};
 use g3_types::net::ChromeH2Settings;
 
@@ -47,6 +47,12 @@ pub(super) struct H2MirrorReport {
 impl H2MirrorReport {
     pub(super) fn is_empty(&self) -> bool {
         *self == H2MirrorReport::default()
+    }
+
+    /// Why a strict mirror can't use this connection: anything not copied from
+    /// the client, a first flight without a request included
+    pub(super) fn strict_error(&self) -> Option<String> {
+        (!self.is_empty()).then(|| format!("h2 not copied from the client: {self}"))
     }
 
     /// Worth a warning: anything but a first flight without a request, which
@@ -180,8 +186,13 @@ fn mirrored_settings(settings: &[(u16, u32)]) -> MirroredSettings {
     }
 }
 
-/// Settings and request framing copied from the client first flight
-fn set_mirror(builder: &mut h2::client::Builder, preface: &H2ClientPreface) -> H2MirrorReport {
+/// Settings and request framing copied from the client first flight; without a
+/// request in it, the request framing learned for the client before
+fn set_mirror(
+    builder: &mut h2::client::Builder,
+    preface: &H2ClientPreface,
+    learned_request: Option<&H2FirstHeaders>,
+) -> H2MirrorReport {
     let mut report = H2MirrorReport::default();
 
     let settings = mirrored_settings(&preface.settings);
@@ -207,7 +218,7 @@ fn set_mirror(builder: &mut h2::client::Builder, preface: &H2ClientPreface) -> H
     }
     report.priority_frames = preface.priority_frames;
 
-    match &preface.headers {
+    match preface.headers.as_ref().or(learned_request) {
         Some(headers) => {
             builder.pseudo_header_order(pseudo_order(&headers.pseudo_order));
             if let Some(p) = headers.priority {
@@ -245,9 +256,12 @@ pub(super) fn remaining_budget(budget: Duration, spent: Duration) -> Duration {
 /// on the wire (SETTINGS, WINDOW_UPDATE, pseudo header order, HEADERS priority)
 /// with Chrome's, so that the HTTP/2 fingerprint matches the TLS one. The mirror
 /// profile takes them from the client first flight instead.
+/// `learned_request` is the request framing learned for this client before,
+/// used when its first flight has no request (a preconnect).
 pub(super) fn upstream_client_builder(
     http_config: &H2InterceptionConfig,
     preface: Option<&H2ClientPreface>,
+    learned_request: Option<&H2FirstHeaders>,
 ) -> (h2::client::Builder, H2MirrorReport) {
     let mut builder = h2::client::Builder::new();
     builder.max_send_buffer_size(http_config.max_send_buffer_size);
@@ -265,7 +279,7 @@ pub(super) fn upstream_client_builder(
         }
         H2UpstreamProfile::Chrome => set_chrome(&mut builder),
         H2UpstreamProfile::Mirror => match preface {
-            Some(p) => report = set_mirror(&mut builder, p),
+            Some(p) => report = set_mirror(&mut builder, p, learned_request),
             None => {
                 set_chrome(&mut builder);
                 report.no_preface = true;
@@ -420,7 +434,16 @@ mod tests {
         config: &H2InterceptionConfig,
         preface: Option<&H2ClientPreface>,
     ) -> (Fingerprint, H2MirrorReport) {
-        let (builder, report) = upstream_client_builder(config, preface);
+        capture_learned(config, preface, None).await
+    }
+
+    /// Same as `capture_mirror` with a request framing learned for the client before
+    async fn capture_learned(
+        config: &H2InterceptionConfig,
+        preface: Option<&H2ClientPreface>,
+        learned: Option<&H2FirstHeaders>,
+    ) -> (Fingerprint, H2MirrorReport) {
+        let (builder, report) = upstream_client_builder(config, preface, learned);
         (capture_builder(builder).await, report)
     }
 
@@ -663,6 +686,67 @@ mod tests {
             remaining_budget(budget, Duration::from_secs(5)),
             Duration::ZERO
         );
+    }
+
+    /// A preconnect of a calibrated client gets the request framing learned for it
+    #[tokio::test]
+    async fn preconnect_uses_learned_request() {
+        let mut preface = firefox_preface();
+        let learned = preface.headers.take().unwrap();
+        let (fp, report) = capture_learned(&mirror_config(), Some(&preface), Some(&learned)).await;
+
+        assert_eq!(fp.akamai, FIREFOX_AKAMAI);
+        assert_eq!(fp.headers_priority, None);
+        assert!(report.is_empty(), "{report}");
+    }
+
+    /// The first flight's own request wins over the learned one
+    #[tokio::test]
+    async fn own_request_wins_over_learned() {
+        let learned = chrome_preface().headers.unwrap();
+        let (fp, _) =
+            capture_learned(&mirror_config(), Some(&firefox_preface()), Some(&learned)).await;
+
+        assert_eq!(fp.akamai, FIREFOX_AKAMAI);
+    }
+
+    #[test]
+    fn strict_error_on_anything_not_copied() {
+        assert_eq!(H2MirrorReport::default().strict_error(), None);
+
+        for (report, word) in [
+            (
+                H2MirrorReport {
+                    no_preface: true,
+                    ..Default::default()
+                },
+                "first flight",
+            ),
+            (
+                H2MirrorReport {
+                    no_request: true,
+                    ..Default::default()
+                },
+                "request",
+            ),
+            (
+                H2MirrorReport {
+                    unknown_settings: vec![9],
+                    ..Default::default()
+                },
+                "0009",
+            ),
+            (
+                H2MirrorReport {
+                    priority_frames: 1,
+                    ..Default::default()
+                },
+                "PRIORITY",
+            ),
+        ] {
+            let e = report.strict_error().expect("strict error");
+            assert!(e.contains(word), "{e}");
+        }
     }
 
     #[tokio::test]

@@ -613,8 +613,10 @@ The keys are:
 
   Send the ALPS (application_settings, new codepoint) extension with Chrome's HTTP/2 SETTINGS
   if h2 is in the ALPN list offered to the upstream server, which is taken from the client.
-  With the h2 interception ``upstream_profile: mirror`` the SETTINGS last seen from the client
-  are sent instead, once there are some.
+  With the h2 interception ``upstream_profile: mirror`` the SETTINGS last seen from this client
+  are sent instead, once there are some. They are kept per client (see the client profiles
+  under ``mirror_client_hello``), so the ClientHello of the client is parsed for its key with
+  ``enable_alps`` alone too.
 
   Only supported for BoringSSL.
 
@@ -683,9 +685,61 @@ The keys are:
   ``enable_sct``, ``enable_ech_grease``, ``enable_alps`` and ``trust_anchor_ids`` only apply in
   these two cases. User-site TLS client configs, TLCP and STARTTLS keep the static ClientHello.
 
+  What the h2 interception (``upstream_profile: mirror``) learns about a client is kept per
+  client: its browser build, by a hash of the ClientHello (cipher suites, extensions, signature
+  algorithms, groups; not the parts that differ between its connections), and its proxy user if
+  it authenticates. The profile holds the HTTP/2 SETTINGS for ALPS and the request framing
+  (pseudo header order, HEADERS priority) for its h2 connections without a request yet.
+  Profiles of the 64 clients seen last are kept.
+
   Only supported for BoringSSL.
 
   **default**: false
+
+* mirror_strict
+
+  **optional**, **type**: bool
+
+  Strict mirroring: rather than send anything the client didn't, fail the connection. Then
+  a ClientHello that can't be parsed, an error while copying it, a value or an extension that
+  can't be copied, a fallback to a static value and a GREASE use different from
+  ``enable_grease`` all fail the upstream connection, and so does, in the h2 interception, a
+  first flight that can't be copied in full. Clients reach hosts other than
+  ``mirror_calibration_host`` only once calibrated: an h2 connection with a request has shown
+  their SETTINGS and request framing, so that ALPS and preconnects carry theirs instead of
+  Chrome's. Until its request framing is learned, the h2 interception reads the first flight
+  of a client for up to 0.5s after SETTINGS, for the first request that Chrome may send in
+  a later TLS record; a preconnect holding the connection without one goes on after that.
+  Rejected connections are logged as warnings with the identity of the pod
+  (``SESSION_ID``, ``BOT_ID``, ``POD_NAME``, ``NODE_NAME`` from the environment).
+
+  .. note:: Client profiles are kept for the 64 clients seen last (see ``mirror_client_hello``).
+     With more clients at a time, the least recently seen one loses its profile: its next
+     connections fail as not calibrated until it calibrates again.
+
+  Needs ``mirror_client_hello`` and ``mirror_calibration_host``, and in the same auditor the
+  h2 interception with ``upstream_profile: mirror``: clients calibrate only there, an auditor
+  without it fails the config check. Only supported for BoringSSL.
+
+  **default**: false
+
+* mirror_calibration_host
+
+  **optional**, **type**: str
+
+  Host of the calibration site: open to clients not calibrated yet, so that they can show
+  their h2 profile there first. Its h2 connections are learned from and not checked strictly.
+
+  **default**: not set
+
+* mirror_calibrated_file
+
+  **optional**, **type**: str
+
+  File to append the key of each newly calibrated client to, one per line, as a readiness
+  signal for the browser, e.g. on a volume shared with it.
+
+  **default**: not set
 
 * insecure:
 
@@ -841,7 +895,8 @@ The keys are:
     :ref:`tls interception client <conf_value_dpi_tls_interception_client>`). The TLS
     handshake with the upstream comes before the client SETTINGS, so the first connection
     after the client changed them still sends the previous ones (Chrome's at start), which
-    is logged as a warning.
+    is logged as a warning. This is also where clients calibrate for ``mirror_strict``, so
+    strict mirroring needs this profile.
 
   Use it together with the browser-like settings of
   :ref:`tls interception client <conf_value_dpi_tls_interception_client>`, so that the

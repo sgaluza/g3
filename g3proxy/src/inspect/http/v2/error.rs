@@ -39,6 +39,8 @@ pub(crate) enum H2InterceptionError {
     CanceledAsServerQuit,
     #[error("idle after {0:?} x {1}")]
     Idle(Duration, usize),
+    #[error("strict mirror: {0}")]
+    MirrorStrict(String),
     #[error("unexpected error: {0:}")]
     UnexpectedError(anyhow::Error),
 }
