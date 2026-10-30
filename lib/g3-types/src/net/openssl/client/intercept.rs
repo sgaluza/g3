@@ -323,12 +323,17 @@ impl OpensslInterceptionClientConfig {
     ) -> anyhow::Result<Ssl> {
         let browser = browser
             .ok_or_else(|| anyhow!("strict mirror: the client ClientHello was not parsed"))?;
-        let host = match server_name {
-            Some(name) => name.as_ref().to_string(),
-            None => upstream.host().to_string(),
+        let calibration_host = match server_name {
+            Some(name) => self.is_calibration_host(name.as_ref()),
+            None => self.is_calibration_upstream(upstream.host()),
         };
         let calibrated = profile.is_some_and(|p| p.calibrated);
-        if !calibrated && !self.is_calibration_host(&host) {
+        if !calibrated && !calibration_host {
+            // strings only for the error, not on every handshake
+            let host = match server_name {
+                Some(name) => name.as_ref().to_string(),
+                None => upstream.host().to_string(),
+            };
             let client = client
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "-".to_string());
@@ -719,6 +724,17 @@ impl OpensslInterceptionClientConfigBuilder {
     #[cfg(not(boringssl))]
     pub fn set_mirror_strict(&mut self, _enable: bool) {
         warn!("strict ClientHello mirroring can only be set for BoringSSL");
+    }
+
+    /// Strict mirroring is set: for checks against other parts of the config
+    #[cfg(boringssl)]
+    pub fn mirror_strict(&self) -> bool {
+        self.mirror_strict
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn mirror_strict(&self) -> bool {
+        false
     }
 
     /// The calibration site: clients go there first, so that their h2 profile
@@ -2346,6 +2362,14 @@ mod tests {
         assert!(e.contains("mirror_calibration_host"), "{e}");
 
         strict_builder().check().unwrap();
+    }
+
+    /// The auditor checks strict mode against its h2 interception
+    #[test]
+    #[cfg(boringssl)]
+    fn builder_tells_strict_mode() {
+        assert!(!OpensslInterceptionClientConfigBuilder::default().mirror_strict());
+        assert!(strict_builder().mirror_strict());
     }
 
     #[test]

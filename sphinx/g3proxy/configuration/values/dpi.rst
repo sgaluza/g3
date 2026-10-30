@@ -715,7 +715,9 @@ The keys are:
      With more clients at a time, the least recently seen one loses its profile: its next
      connections fail as not calibrated until it calibrates again.
 
-  Needs ``mirror_client_hello`` and ``mirror_calibration_host``. Only supported for BoringSSL.
+  Needs ``mirror_client_hello`` and ``mirror_calibration_host``, and in the same auditor the
+  h2 interception with ``upstream_profile: mirror``: clients calibrate only there, an auditor
+  without it fails the config check. Only supported for BoringSSL.
 
   **default**: false
 
@@ -891,7 +893,8 @@ The keys are:
     :ref:`tls interception client <conf_value_dpi_tls_interception_client>`). The TLS
     handshake with the upstream comes before the client SETTINGS, so the first connection
     after the client changed them still sends the previous ones (Chrome's at start), which
-    is logged as a warning.
+    is logged as a warning. This is also where clients calibrate for ``mirror_strict``, so
+    strict mirroring needs this profile.
 
   Use it together with the browser-like settings of
   :ref:`tls interception client <conf_value_dpi_tls_interception_client>`, so that the
