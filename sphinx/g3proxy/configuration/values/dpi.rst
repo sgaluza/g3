@@ -613,8 +613,10 @@ The keys are:
 
   Send the ALPS (application_settings, new codepoint) extension with Chrome's HTTP/2 SETTINGS
   if h2 is in the ALPN list offered to the upstream server, which is taken from the client.
-  With the h2 interception ``upstream_profile: mirror`` the SETTINGS last seen from the client
-  are sent instead, once there are some.
+  With the h2 interception ``upstream_profile: mirror`` the SETTINGS last seen from this client
+  are sent instead, once there are some. They are kept per client (see the client profiles
+  under ``mirror_client_hello``), so the ClientHello of the client is parsed for its key with
+  ``enable_alps`` alone too.
 
   Only supported for BoringSSL.
 

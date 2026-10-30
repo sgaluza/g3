@@ -244,6 +244,19 @@ impl OpensslInterceptionClientConfig {
         false
     }
 
+    /// Whether the browser ClientHello is parsed: for the mirror, and for the
+    /// client profile, whose learned SETTINGS the ALPS sends
+    #[cfg(boringssl)]
+    pub fn parses_client_hello(&self) -> bool {
+        let hello = &self.ssl_context_pair.hello;
+        hello.mirror_client_hello || hello.enable_alps
+    }
+
+    #[cfg(not(boringssl))]
+    pub fn parses_client_hello(&self) -> bool {
+        false
+    }
+
     /// Strict mirroring: a connection that can't copy the client fails
     #[cfg(boringssl)]
     pub fn mirror_strict(&self) -> bool {
@@ -2362,6 +2375,22 @@ mod tests {
         assert!(e.contains("mirror_calibration_host"), "{e}");
 
         strict_builder().check().unwrap();
+    }
+
+    /// ALPS without the mirror still learns the client SETTINGS: the client
+    /// profile needs the parsed ClientHello
+    #[test]
+    #[cfg(boringssl)]
+    fn client_hello_parsed_for_mirror_or_alps() {
+        let build = |mirror: bool, alps: bool| {
+            let mut builder = OpensslInterceptionClientConfigBuilder::default();
+            builder.set_mirror_client_hello(mirror);
+            builder.set_enable_alps(alps);
+            builder.build().unwrap()
+        };
+        assert!(!build(false, false).parses_client_hello());
+        assert!(build(true, false).parses_client_hello());
+        assert!(build(false, true).parses_client_hello());
     }
 
     /// The auditor checks strict mode against its h2 interception

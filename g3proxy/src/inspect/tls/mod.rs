@@ -47,12 +47,13 @@ pub(super) struct ParsedClientHello {
     pub(super) version: RawVersion,
     pub(super) sni: Option<TlsServerName>,
     pub(super) alpn: Option<TlsAlpn>,
-    /// Set if `mirror_client_hello` is enabled and the ClientHello could be parsed for it
+    /// Set if the client config parses the browser ClientHello (mirror or
+    /// ALPS) and it could be parsed: for the mirror and the client profile
     pub(super) browser: Option<BrowserClientHello>,
 }
 
 impl ParsedClientHello {
-    pub(super) fn parse(ch: ClientHello<'_>, mirror: bool) -> anyhow::Result<Self> {
+    pub(super) fn parse(ch: ClientHello<'_>, parse_browser: bool) -> anyhow::Result<Self> {
         let mut sni: Option<TlsServerName> = None;
         let mut alpn: Option<TlsAlpn> = None;
 
@@ -77,12 +78,13 @@ impl ParsedClientHello {
             }
         }
 
-        // a ClientHello the mirror can't parse still goes upstream, with the static one
-        let browser = if mirror {
+        // a ClientHello that can't be parsed still goes upstream: with the static
+        // one instead of a mirror, and without a client profile
+        let browser = if parse_browser {
             BrowserClientHello::parse(ch.cipher_suites, ch.extensions)
                 .inspect_err(|e| {
                     let sni = sni.as_ref().map(|n| n.as_ref()).unwrap_or("-");
-                    warn!("can't mirror ClientHello for SNI {sni}, using the static one: {e}");
+                    warn!("can't parse browser ClientHello for SNI {sni}: {e}");
                 })
                 .ok()
         } else {
@@ -198,7 +200,7 @@ impl TlsInterceptionContext {
         let mut handshake_coalescer =
             HandshakeCoalescer::new(self.server_config.client_hello_max_size);
         let mut record_offset = 0;
-        let mirror = self.client_config.mirror_client_hello();
+        let parse_browser = self.client_config.parses_client_hello();
 
         loop {
             let mut record = match Record::parse(&clt_r_buf[record_offset..]) {
@@ -229,10 +231,10 @@ impl TlsInterceptionContext {
                     let ch = handshake_msg
                         .parse_client_hello()
                         .map_err(|_| anyhow!("invalid tls client hello request"))?;
-                    return ParsedClientHello::parse(ch, mirror);
+                    return ParsedClientHello::parse(ch, parse_browser);
                 }
                 Ok(None) => match handshake_coalescer.parse_client_hello() {
-                    Ok(Some(ch)) => return ParsedClientHello::parse(ch, mirror),
+                    Ok(Some(ch)) => return ParsedClientHello::parse(ch, parse_browser),
                     Ok(None) => {
                         if !record.consume_done() {
                             return Err(anyhow!("partial fragmented tls client hello request"));
