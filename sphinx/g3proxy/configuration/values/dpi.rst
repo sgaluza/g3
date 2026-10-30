@@ -683,18 +683,16 @@ The keys are:
   ``enable_sct``, ``enable_ech_grease``, ``enable_alps`` and ``trust_anchor_ids`` only apply in
   these two cases. User-site TLS client configs, TLCP and STARTTLS keep the static ClientHello.
 
-  Only supported for BoringSSL.
-
-  **default**: false
-
   What the h2 interception (``upstream_profile: mirror``) learns about a client is kept per
   client: its browser build, by a hash of the ClientHello (cipher suites, extensions, signature
   algorithms, groups; not the parts that differ between its connections), and its proxy user if
   it authenticates. The profile holds the HTTP/2 SETTINGS for ALPS and the request framing
   (pseudo header order, HEADERS priority) for its h2 connections without a request yet.
-  Profiles of the 64 clients seen last are kept: with more clients at a time, the least
-  recently seen one loses its profile, and with ``mirror_strict`` its next connections fail
-  until it calibrates again.
+  Profiles of the 64 clients seen last are kept.
+
+  Only supported for BoringSSL.
+
+  **default**: false
 
 * mirror_strict
 
@@ -712,6 +710,10 @@ The keys are:
   a later TLS record; a preconnect holding the connection without one goes on after that.
   Rejected connections are logged as warnings with the identity of the pod
   (``SESSION_ID``, ``BOT_ID``, ``POD_NAME``, ``NODE_NAME`` from the environment).
+
+  .. note:: Client profiles are kept for the 64 clients seen last (see ``mirror_client_hello``).
+     With more clients at a time, the least recently seen one loses its profile: its next
+     connections fail as not calibrated until it calibrates again.
 
   Needs ``mirror_client_hello`` and ``mirror_calibration_host``. Only supported for BoringSSL.
 
